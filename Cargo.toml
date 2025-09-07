@@ -30,6 +30,7 @@ hound = "3.5"
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 base64 = "0.22"
+uuid = { version = "1", features = ["v4"] }
 
 
 # Async trait support
@@ -51,6 +52,10 @@ tokio-test = "0.4"
 [[bin]]
 name = "waystt"
 path = "src/bin/waystt.rs"
+
+[[bin]]
+name = "wayctl"
+path = "src/bin/wayctl.rs"
 
 [profile.release]
 opt-level = 3

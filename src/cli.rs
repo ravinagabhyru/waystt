@@ -9,6 +9,7 @@ pub struct RunOptions {
     pub envfile: Option<PathBuf>,
     pub pipe_to: Option<Vec<String>>,
     pub download_model: bool,
+    pub daemon: bool,
 }
 
 /// Default path for the env file.

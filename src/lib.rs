@@ -13,6 +13,7 @@ pub mod app;
 pub mod cli;
 pub mod config;
 pub mod pipeline;
+pub mod ipc;
 pub mod signals;
 
 // Re-export existing modules for backward-compatibility and tests
@@ -53,8 +54,18 @@ pub async fn run(options: cli::RunOptions) -> Result<i32> {
     let provider =
         crate::transcription::TranscriptionFactory::create_provider(kind, &config).await?;
 
-    // Create app and run
-    let app = crate::app::App::init(options, config, provider).await?;
+    // Create app
+    let app = crate::app::App::init(options.clone(), config, provider).await?;
+
+    // If running as a daemon, serve IPC instead of signal flow
+    if options.daemon {
+        let socket_path = crate::ipc::default_socket_path();
+        eprintln!("Starting IPC server at {}", socket_path.display());
+        crate::ipc::serve(app, socket_path).await?;
+        return Ok(0);
+    }
+
+    // One-shot mode via signal flow
     app.run().await
 }
 

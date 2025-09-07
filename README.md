@@ -1,10 +1,11 @@
 # waystt - Wayland Speech-to-Text Tool
 
-Press a keybind, speak, and get instant text output. A speech-to-text tool that transcribes audio using OpenAI Whisper and outputs to stdout.
+Press a keybind, speak, and get instant text output. A speech-to-text tool that transcribes audio using OpenAI Whisper and outputs to stdout. Now includes a daemon + control client (wayctl) for robust IPC-driven workflows.
 
 ## Features
 
-- **Signal-driven**: Press keybind → speak → get text (no GUI needed)
+- **Daemon + control client**: `waystt --daemon` + `wayctl` to start/stop/transcribe
+- **Signal-driven**: Legacy flow still supported (SIGUSR1)
 - **UNIX philosophy**: Outputs transcribed text to stdout for piping to other tools
 - **On-demand operation**: Starts when called, processes audio, then exits
 - **Audio feedback**: Beeps confirm recording start/stop and success
@@ -28,16 +29,16 @@ sudo apt install pipewire-pulse
 sudo dnf install pipewire-pulseaudio
 ```
 
-**Optional (for direct typing keybindings):**
+**Optional tools (for output actions):**
 ```bash
 # Arch Linux
-sudo pacman -S ydotool
+sudo pacman -S wl-clipboard wtype ydotool
 
 # Ubuntu/Debian  
-sudo apt install ydotool
+sudo apt install wl-clipboard wtype ydotool xclip
 
 # Fedora
-sudo dnf install ydotool
+sudo dnf install wl-clipboard wtype ydotool xclip
 
 # Setup ydotool permissions and service:
 sudo usermod -a -G input $USER
@@ -86,16 +87,36 @@ mkdir -p ~/.config/waystt
 echo "OPENAI_API_KEY=your_api_key_here" > ~/.config/waystt/.env
 ```
 
-2. **Test the application:**
+2. **Test the application (one-shot):**
 ```bash
 # Run waystt and pipe output to see it working
 waystt | tee /tmp/waystt-output.txt
 ```
 
-3. **Use with signals:**
+3. **Use with signals (legacy):**
 ```bash
 # Transcribe and output to stdout
 pkill --signal SIGUSR1 waystt
+```
+
+4. **Daemon + wayctl (recommended):**
+```bash
+# Terminal A: Start daemon
+waystt --daemon
+
+# Terminal B: Control the daemon
+wayctl ping           # prints state/provider/model
+wayctl status         # prints state/provider/model
+wayctl start          # begin recording
+wayctl stop           # stop + transcribe to stdout (default)
+wayctl transcribe     # one-shot: auto-start, stop on trailing silence, transcribe
+
+# Copy to clipboard or type directly
+wayctl transcribe --output clipboard
+wayctl transcribe --output type
+
+# Configure trailing silence (default 3000ms)
+wayctl transcribe --silence-ms 5000
 ```
 
 ## Quick Reference
@@ -119,7 +140,7 @@ waystt --pipe-to ydotool type --file -
 pkill --signal SIGUSR1 waystt
 ```
 
-### Keybinding Pattern
+### Keybinding Pattern (legacy signals)
 
 Most keybindings follow this pattern:
 ```bash
@@ -128,11 +149,24 @@ pgrep -x waystt >/dev/null && pkill --signal SIGUSR1 waystt || (waystt [OPTIONS]
 
 This means: "If waystt is running, send signal to transcribe. Otherwise, start waystt with specified options."
 
+### Keybinding Pattern (daemon + wayctl)
+
+Recommended approach using the daemon and wayctl:
+
+```bash
+# Start daemon on login (see systemd user unit below)
+
+# Keybind examples
+bind = SUPER, R, exec, wayctl start
+bind = SUPER SHIFT, R, exec, wayctl stop --output type
+bind = SUPER CTRL, R, exec, wayctl stop --output clipboard
+```
+
 ## Keyboard Shortcuts Setup
 
 ### Hyprland
 
-Add to your `~/.config/hypr/hyprland.conf`:
+Add to your `~/.config/hypr/hyprland.conf` to use signals instead of daemon:
 
 ```bash
 # waystt - Speech to Text (direct typing)
@@ -144,7 +178,7 @@ bind = SUPER SHIFT, R, exec, pgrep -x waystt >/dev/null && pkill --signal SIGUSR
 
 ### Niri
 
-Add to your `~/.config/niri/config.kdl`:
+Add to your `~/.config/niri/config.kdl` to use signals instead of daemon:
 
 ```kdl
 binds {
@@ -174,7 +208,7 @@ waystt > transcription.txt
 pkill --signal SIGUSR1 waystt
 ```
 
-### Using --pipe-to Option
+### Using --pipe-to Option (one-shot)
 
 The `--pipe-to` option allows you to pipe transcribed text directly to another command:
 
@@ -196,6 +230,58 @@ waystt --pipe-to sh -c "echo \"$(date): $(cat)\" >> speech-log.txt"
 pkill --signal SIGUSR1 waystt
 ```
 
+
+## Daemon + wayctl
+
+Run a long-lived daemon and control it with `wayctl`.
+
+### Socket path
+- Default: `$XDG_RUNTIME_DIR/waystt/waystt.sock`
+- If `XDG_RUNTIME_DIR` is not set, the daemon falls back to `/tmp/waystt-<user>/waystt.sock`.
+- You can override with `--socket` on both `waystt --daemon` and `wayctl`.
+
+### Commands
+- `wayctl ping` → liveness + status summary
+- `wayctl status` → state/provider/model
+- `wayctl start` → begin recording
+- `wayctl stop [--output stdout|clipboard|type]` → stop + transcribe
+- `wayctl transcribe [--silence-ms 3000] [--output ...]` → auto-start, stop after trailing silence, transcribe
+- `wayctl cancel` → stop without transcription
+
+### Output modes
+- `stdout` (default): print text to wayctl stdout
+- `clipboard`: copy text using `wl-copy` (fallback: `xclip` on X11)
+- `type`: type text into the focused window using `wtype` (fallback: `ydotool`)
+
+Notes:
+- Ensure `wl-clipboard` is installed for clipboard operations on Wayland.
+- For typing, `wtype` is preferred; `ydotool` may require uinput permissions and a running daemon.
+
+### Systemd user unit (optional)
+
+Create `~/.config/systemd/user/waystt.service`:
+
+```
+[Unit]
+Description=waystt daemon
+After=pipewire.service
+
+[Service]
+ExecStart=%h/.local/bin/waystt --daemon
+Restart=on-failure
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=default.target
+```
+
+Then:
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now waystt.service
+```
+
+You can now bind `wayctl` commands in your compositor to control the daemon.
 
 ## Configuration
 
@@ -325,6 +411,21 @@ RUST_LOG=debug
 
 
 ## Troubleshooting
+
+### IPC (daemon + wayctl)
+
+- Verify the daemon is running and note the socket path it prints on startup (defaults to `$XDG_RUNTIME_DIR/waystt/waystt.sock`).
+  - Check the socket exists: `ls -l "$XDG_RUNTIME_DIR/waystt/waystt.sock"`
+  - If `XDG_RUNTIME_DIR` is not set, the daemon falls back to `/tmp/waystt-<user>/waystt.sock`. Pass this path to `wayctl` with `--socket`.
+- Ensure `waystt` and `wayctl` are using the same socket:
+  - `wayctl --socket "$XDG_RUNTIME_DIR/waystt/waystt.sock" ping`
+- Remove stale sockets and restart the daemon if needed:
+  - `rm -f "$XDG_RUNTIME_DIR/waystt/waystt.sock" && waystt --daemon`
+- Permissions: the socket directory should be `0700`, socket file `0600`, and both owned by your user.
+- Debug logs: run the daemon with `RUST_LOG=debug waystt --daemon` and re-run `wayctl`.
+- Output actions failing with `no_backend`:
+  - Clipboard: install `wl-clipboard` (Wayland) or `xclip` (X11) and re-try.
+  - Type: install `wtype` (preferred) or set up `ydotool` (requires input group and running `ydotoold`).
 
 ### Audio Issues
 

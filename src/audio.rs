@@ -203,6 +203,10 @@ impl AudioRecorder {
         // This method is a no-op for compatibility
         Ok(())
     }
+
+    pub fn is_recording(&self) -> bool {
+        self.is_recording.load(Ordering::Relaxed)
+    }
 }
 
 impl Drop for AudioRecorder {

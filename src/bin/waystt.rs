@@ -21,6 +21,13 @@ struct Args {
     /// Download the configured local model and exit
     #[arg(long)]
     download_model: bool,
+
+    /// Run as a long-lived daemon controlled by signals
+    /// - SIGUSR2: start recording
+    /// - SIGUSR1: stop + transcribe
+    /// - SIGTERM: shutdown
+    #[arg(long, short = 'd')]
+    daemon: bool,
 }
 
 #[tokio::main]
@@ -31,6 +38,7 @@ async fn main() -> anyhow::Result<()> {
         envfile,
         pipe_to: args.pipe_to,
         download_model: args.download_model,
+        daemon: args.daemon,
     };
 
     let code = waystt::run(options).await?;
