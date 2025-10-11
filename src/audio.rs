@@ -204,6 +204,7 @@ impl AudioRecorder {
         Ok(())
     }
 
+    #[must_use]
     pub fn is_recording(&self) -> bool {
         self.is_recording.load(Ordering::Relaxed)
     }

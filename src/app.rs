@@ -56,15 +56,16 @@ impl App {
     /// # Errors
     ///
     /// Returns an error if signal handling fails or audio recording cannot be started
+    #[allow(clippy::too_many_lines)]
     pub async fn run(mut self) -> Result<i32> {
-        eprintln!("waystt - Wayland Speech-to-Text Tool");
-
         // App state machine modes
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         enum RecState {
             Idle,
             Recording,
         }
+
+        eprintln!("waystt - Wayland Speech-to-Text Tool");
 
         let mut state = if self.daemon {
             eprintln!("Daemon mode: waiting for SIGUSR2 to start recording");
@@ -158,23 +159,17 @@ impl App {
                                     eprintln!("Failed to clear audio buffer: {e}");
                                 }
 
-                                match res {
-                                    Ok(code) => {
-                                        if self.daemon {
-                                            state = RecState::Idle;
-                                            // stay alive for next cycle
-                                        } else {
-                                            return Ok(code);
-                                        }
+                                if let Ok(code) = res {
+                                    if self.daemon {
+                                        state = RecState::Idle;
+                                        // stay alive for next cycle
+                                    } else {
+                                        return Ok(code);
                                     }
-                                    Err(_) => {
-                                        if self.daemon {
-                                            state = RecState::Idle;
-                                        }
-                                        if !self.daemon {
-                                            return Ok(1);
-                                        }
-                                    }
+                                } else if self.daemon {
+                                    state = RecState::Idle;
+                                } else {
+                                    return Ok(1);
                                 }
                             }
                         }
@@ -196,7 +191,7 @@ impl App {
                     }
                 }
                 Ok(None) => break, // stream ended
-                Err(_) => continue, // timeout
+                Err(_) => {}, // timeout
             }
         }
 
@@ -315,9 +310,9 @@ impl App {
 
     // IPC helpers: used by the Unix socket server
     pub(crate) async fn ipc_start(&mut self) -> Result<()> {
-        if let Err(e) = self.recorder.clear_buffer() { eprintln!("Buffer clear failed before start: {}", e); }
+        if let Err(e) = self.recorder.clear_buffer() { eprintln!("Buffer clear failed before start: {e}"); }
         if let Err(e) = self.beeps.play_async(BeepType::RecordingStart).await {
-            eprintln!("Start beep failed: {}", e);
+            eprintln!("Start beep failed: {e}");
         }
         tokio::time::sleep(tokio::time::Duration::from_millis(600)).await;
         self.recorder.start_recording()?;
@@ -327,12 +322,13 @@ impl App {
     pub(crate) async fn ipc_cancel(&mut self) -> Result<()> {
         let _ = self.recorder.stop_recording();
         if let Err(e) = self.beeps.play_async(BeepType::RecordingStop).await {
-            eprintln!("Stop beep failed: {}", e);
+            eprintln!("Stop beep failed: {e}");
         }
         self.recorder.clear_buffer()?;
         Ok(())
     }
 
+    #[allow(clippy::cast_possible_truncation)]
     pub(crate) async fn ipc_stop_and_transcribe(
         &mut self,
         options: crate::ipc::IpcOptions,
@@ -340,7 +336,7 @@ impl App {
         let start = std::time::Instant::now();
         let _ = self.recorder.stop_recording();
         if let Err(e) = self.beeps.play_async(BeepType::RecordingStop).await {
-            eprintln!("Stop beep failed: {}", e);
+            eprintln!("Stop beep failed: {e}");
         }
         let audio_data = self.recorder.get_audio_data()?;
         let text = self.ipc_transcribe_text(audio_data).await?;
@@ -384,8 +380,9 @@ impl App {
     }
 
     /// Start capture and wait until trailing silence is detected, then stop.
-    /// Heuristics: require at least min_ms of capture after first voice; stop after silence_ms of trailing silence;
-    /// and cap total at max_ms to avoid indefinite capture.
+    /// Heuristics: require at least `min_ms` of capture after first voice; stop after `silence_ms` of trailing silence;
+    /// and cap total at `max_ms` to avoid indefinite capture.
+    #[allow(clippy::cast_possible_truncation)]
     pub(crate) async fn ipc_capture_until_silence(
         &mut self,
         min_ms: u64,
@@ -406,7 +403,7 @@ impl App {
         let mut last_voice_time: Option<std::time::Instant> = None;
         let mut peak_rms: f32 = 0.0;
         let proc = AudioProcessor::new(sr);
-        let win_samples = ((sr as u64 * window_ms) / 1000) as usize;
+        let win_samples = ((u64::from(sr) * window_ms) / 1000) as usize;
 
         loop {
             // Safety cap
@@ -414,12 +411,9 @@ impl App {
                 break;
             }
 
-            let data = match self.recorder.get_audio_data() {
-                Ok(d) => d,
-                Err(_) => {
-                    tokio::time::sleep(std::time::Duration::from_millis(poll_ms)).await;
-                    continue;
-                }
+            let Ok(data) = self.recorder.get_audio_data() else {
+                tokio::time::sleep(std::time::Duration::from_millis(poll_ms)).await;
+                continue;
             };
 
             if data.len() >= win_samples {
@@ -450,7 +444,7 @@ impl App {
 
         // Stop recording without clearing buffer
         let _ = self.recorder.stop_recording();
-        if let Err(e) = self.beeps.play_async(BeepType::RecordingStop).await { eprintln!("Stop beep failed: {}", e); }
+        if let Err(e) = self.beeps.play_async(BeepType::RecordingStop).await { eprintln!("Stop beep failed: {e}"); }
         Ok(())
     }
 }

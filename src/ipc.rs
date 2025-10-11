@@ -6,32 +6,22 @@ use tokio::net::{UnixListener, UnixStream};
 
 use crate::app::App;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputMode {
+    #[default]
     Stdout,
     Clipboard,
     Type,
 }
 
-impl Default for OutputMode {
-    fn default() -> Self {
-        OutputMode::Stdout
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum TypeNewlines {
+    #[default]
     Spaces,
     Enter,
     Literal,
-}
-
-impl Default for TypeNewlines {
-    fn default() -> Self {
-        TypeNewlines::Spaces
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -90,7 +80,7 @@ fn ensure_runtime_dir() -> Result<PathBuf> {
     } else {
         let tmp = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
         let user = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
-        PathBuf::from(tmp).join(format!("waystt-{}", user))
+        PathBuf::from(tmp).join(format!("waystt-{user}"))
     };
     let dir = dir_base.join("waystt");
     std::fs::create_dir_all(&dir)?;
@@ -102,12 +92,18 @@ fn ensure_runtime_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
+#[must_use]
 pub fn default_socket_path() -> PathBuf {
     ensure_runtime_dir()
         .unwrap_or_else(|_| PathBuf::from("/tmp/waystt"))
         .join("waystt.sock")
 }
 
+/// Serve IPC requests on a Unix socket
+///
+/// # Errors
+///
+/// Returns an error if the socket cannot be bound or if an I/O error occurs
 pub async fn serve(mut app: App, socket_path: PathBuf) -> Result<()> {
     // Clean stale socket
     if socket_path.exists() {
@@ -131,7 +127,7 @@ pub async fn serve(mut app: App, socket_path: PathBuf) -> Result<()> {
         let (stream, _) = listener.accept().await?;
         // Handle connections sequentially to avoid reentrancy for now
         if let Err(e) = handle_connection(stream, &mut app).await {
-            eprintln!("IPC connection error: {}", e);
+            eprintln!("IPC connection error: {e}");
         }
     }
 }
@@ -153,7 +149,7 @@ async fn handle_connection(stream: UnixStream, app: &mut App) -> Result<()> {
             Ok(v) => v,
             Err(e) => {
                 let resp = IpcResponse {
-                    id: "".to_string(),
+                    id: String::new(),
                     ok: false,
                     result: None,
                     error: Some(IpcError { code: "bad_request".into(), message: e.to_string() }),
@@ -185,13 +181,7 @@ async fn dispatch_request(app: &mut App, req: IpcRequest) -> IpcResponse {
     };
 
     match cmd {
-        "ping" => IpcResponse {
-            id,
-            ok: true,
-            result: Some(app.ipc_status()),
-            error: None,
-        },
-        "status" => IpcResponse {
+        "ping" | "status" => IpcResponse {
             id,
             ok: true,
             result: Some(app.ipc_status()),
@@ -213,7 +203,7 @@ async fn dispatch_request(app: &mut App, req: IpcRequest) -> IpcResponse {
                     result: Some(IpcResult {
                         state: app.ipc_status().state,
                         text,
-                        output: format!("{:?}", output_mode).to_lowercase(),
+                        output: format!("{output_mode:?}").to_lowercase(),
                         duration_ms,
                         provider: app.ipc_status().provider,
                         model: app.ipc_status().model,
@@ -227,7 +217,7 @@ async fn dispatch_request(app: &mut App, req: IpcRequest) -> IpcResponse {
             // If not recording, start and capture until trailing silence
             if !app.is_recording() {
                 if let Err(e) = app.ipc_start().await {
-                    return fail("invalid_state", format!("failed to start recording: {}", e));
+                    return fail("invalid_state", format!("failed to start recording: {e}"));
                 }
                 // Capture until trailing silence:
                 // - at least 300ms of speech after first voice
@@ -235,7 +225,7 @@ async fn dispatch_request(app: &mut App, req: IpcRequest) -> IpcResponse {
                 // - max 10 seconds cap
                 let silence = opts.silence_ms.unwrap_or(3000).clamp(100, 30_000);
                 if let Err(e) = app.ipc_capture_until_silence(300, silence, 10_000).await {
-                    return fail("internal", format!("capture error: {}", e));
+                    return fail("internal", format!("capture error: {e}"));
                 }
             }
             match app.ipc_stop_and_transcribe(opts).await {
@@ -245,7 +235,7 @@ async fn dispatch_request(app: &mut App, req: IpcRequest) -> IpcResponse {
                     result: Some(IpcResult {
                         state: app.ipc_status().state,
                         text,
-                        output: format!("{:?}", output_mode).to_lowercase(),
+                        output: format!("{output_mode:?}").to_lowercase(),
                         duration_ms,
                         provider: app.ipc_status().provider,
                         model: app.ipc_status().model,
@@ -255,9 +245,15 @@ async fn dispatch_request(app: &mut App, req: IpcRequest) -> IpcResponse {
                 Err(e) => fail("internal", e.to_string()),
             }
         }
-        _ => fail("unknown_cmd", format!("Unknown command: {}", cmd)),
+        _ => fail("unknown_cmd", format!("Unknown command: {cmd}")),
     }
 }
+
+/// Copy text to clipboard using wl-copy or xclip
+///
+/// # Errors
+///
+/// Returns an error if neither wl-copy nor xclip are available
 pub async fn copy_to_clipboard(text: &str) -> Result<()> {
     // Try wl-copy
     let wl = vec!["wl-copy".to_string()];
@@ -274,11 +270,15 @@ pub async fn copy_to_clipboard(text: &str) -> Result<()> {
     Err(anyhow!("no_backend: neither wl-copy nor xclip available"))
 }
 
+/// Type text using ydotool or wtype
+///
+/// # Errors
+///
+/// Returns an error if neither ydotool nor wtype are available
 pub async fn type_text(text: &str, nl: TypeNewlines) -> Result<()> {
     let mapped = match nl {
         TypeNewlines::Spaces => text.replace(['\r', '\n'], " "),
-        TypeNewlines::Enter => text.to_string(),
-        TypeNewlines::Literal => text.to_string(),
+        TypeNewlines::Enter | TypeNewlines::Literal => text.to_string(),
     };
     // Try ydotool first
     let y = vec![

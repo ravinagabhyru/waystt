@@ -10,7 +10,7 @@ use uuid::Uuid;
 #[command(name = "wayctl")]
 #[command(about = "Control client for waystt daemon")]
 struct Cli {
-    /// Path to the Unix socket (defaults to XDG_RUNTIME_DIR/waystt/waystt.sock)
+    /// Path to the Unix socket (defaults to `XDG_RUNTIME_DIR/waystt/waystt.sock`)
     #[arg(long)]
     socket: Option<PathBuf>,
 
@@ -78,13 +78,17 @@ async fn main() -> Result<()> {
         Commands::Stop {
             output,
             type_newlines,
-        } => (
-            "stop",
-            json!({
-                "output": format!("{}", to_lower(output)),
-                "type_newlines": format!("{}", to_lower(type_newlines)),
-            }),
-        ),
+        } => {
+            let output_str = to_lower(output);
+            let type_newlines_str = to_lower(type_newlines);
+            (
+                "stop",
+                json!({
+                    "output": output_str,
+                    "type_newlines": type_newlines_str,
+                }),
+            )
+        }
         Commands::Transcribe { output, type_newlines, silence_ms } => {
             let mut opts = serde_json::Map::new();
             opts.insert("output".into(), serde_json::Value::String(to_lower(output)));
@@ -107,9 +111,10 @@ async fn main() -> Result<()> {
 }
 
 async fn send(socket: &PathBuf, payload: &str) -> Result<serde_json::Value> {
+    let socket_display = socket.display();
     let stream = UnixStream::connect(socket)
         .await
-        .map_err(|e| anyhow!("Failed to connect to {}: {}", socket.display(), e))?;
+        .map_err(|e| anyhow!("Failed to connect to {socket_display}: {e}"))?;
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
 
@@ -124,16 +129,16 @@ async fn send(socket: &PathBuf, payload: &str) -> Result<serde_json::Value> {
 }
 
 fn handle_response(v: &serde_json::Value) -> Result<()> {
-    let ok = v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false);
+    let ok = v.get("ok").and_then(serde_json::Value::as_bool).unwrap_or(false);
     if !ok {
         let err = v.get("error").cloned().unwrap_or_default();
-        return Err(anyhow!(format!("error: {}", err)));
+        return Err(anyhow!(format!("error: {err}")));
     }
     let result = v.get("result").cloned().unwrap_or_default();
     // If there's text, print text (stdout mode). Otherwise show a concise status.
     if let Some(text) = result.get("text").and_then(|s| s.as_str()) {
         if !text.is_empty() {
-            println!("{}", text);
+            println!("{text}");
             return Ok(());
         }
     }
@@ -143,20 +148,20 @@ fn handle_response(v: &serde_json::Value) -> Result<()> {
     let model = result.get("model").and_then(|s| s.as_str()).unwrap_or("");
     let duration = result
         .get("duration_ms")
-        .and_then(|n| n.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
     if !state.is_empty() || !provider.is_empty() || !model.is_empty() || duration > 0 {
         if !state.is_empty() {
-            println!("state: {}", state);
+            println!("state: {state}");
         }
         if !provider.is_empty() {
-            println!("provider: {}", provider);
+            println!("provider: {provider}");
         }
         if !model.is_empty() {
-            println!("model: {}", model);
+            println!("model: {model}");
         }
         if duration > 0 {
-            println!("duration_ms: {}", duration);
+            println!("duration_ms: {duration}");
         }
     } else {
         // Fallback: print the raw JSON result for visibility
@@ -166,5 +171,5 @@ fn handle_response(v: &serde_json::Value) -> Result<()> {
 }
 
 fn to_lower<T: std::fmt::Debug>(v: T) -> String {
-    format!("{:?}", v).to_lowercase()
+    format!("{v:?}").to_lowercase()
 }
