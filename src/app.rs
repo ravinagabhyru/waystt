@@ -75,7 +75,6 @@ impl App {
             if let Err(e) = self.beeps.play_async(BeepType::RecordingStart).await {
                 eprintln!("Warning: Failed to play recording start beep: {e}");
             }
-            tokio::time::sleep(tokio::time::Duration::from_millis(600)).await;
             if let Err(e) = self.recorder.start_recording() {
                 eprintln!("Failed to start recording: {e}");
                 return Ok(1);
@@ -109,7 +108,6 @@ impl App {
                                 if let Err(e) = self.beeps.play_async(BeepType::RecordingStart).await {
                                     eprintln!("Warning: Failed to play recording start beep: {e}");
                                 }
-                                tokio::time::sleep(tokio::time::Duration::from_millis(600)).await;
                                 if let Err(e) = self.recorder.start_recording() {
                                     eprintln!("Failed to start recording: {e}");
                                 } else {
@@ -314,7 +312,6 @@ impl App {
         if let Err(e) = self.beeps.play_async(BeepType::RecordingStart).await {
             eprintln!("Start beep failed: {e}");
         }
-        tokio::time::sleep(tokio::time::Duration::from_millis(600)).await;
         self.recorder.start_recording()?;
         Ok(())
     }
