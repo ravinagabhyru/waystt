@@ -291,7 +291,7 @@ pub async fn type_text(text: &str, nl: TypeNewlines) -> Result<()> {
     if code == 0 { return Ok(()); }
 
     // Try wtype --file - (not all versions support it)
-    let w = vec!["wtype".to_string(), "--file".to_string(), "-".to_string()];
+    let w = vec!["wtype".to_string(), "-".to_string()];
     let code = crate::command::execute_with_input(&w, &mapped).await.unwrap_or(-1);
     if code == 0 { return Ok(()); }
 
