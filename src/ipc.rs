@@ -152,7 +152,10 @@ async fn handle_connection(stream: UnixStream, app: &mut App) -> Result<()> {
                     id: String::new(),
                     ok: false,
                     result: None,
-                    error: Some(IpcError { code: "bad_request".into(), message: e.to_string() }),
+                    error: Some(IpcError {
+                        code: "bad_request".into(),
+                        message: e.to_string(),
+                    }),
                 };
                 let payload = serde_json::to_string(&resp)? + "\n";
                 writer.write_all(payload.as_bytes()).await?;
@@ -177,7 +180,10 @@ async fn dispatch_request(app: &mut App, req: IpcRequest) -> IpcResponse {
         id: id.clone(),
         ok: false,
         result: None,
-        error: Some(IpcError { code: code.into(), message }),
+        error: Some(IpcError {
+            code: code.into(),
+            message,
+        }),
     };
 
     match cmd {
@@ -188,31 +194,39 @@ async fn dispatch_request(app: &mut App, req: IpcRequest) -> IpcResponse {
             error: None,
         },
         "start" => match app.ipc_start().await {
-            Ok(()) => IpcResponse { id, ok: true, result: Some(app.ipc_status()), error: None },
+            Ok(()) => IpcResponse {
+                id,
+                ok: true,
+                result: Some(app.ipc_status()),
+                error: None,
+            },
             Err(e) => fail("invalid_state", e.to_string()),
         },
         "cancel" => match app.ipc_cancel().await {
-            Ok(()) => IpcResponse { id, ok: true, result: Some(app.ipc_status()), error: None },
+            Ok(()) => IpcResponse {
+                id,
+                ok: true,
+                result: Some(app.ipc_status()),
+                error: None,
+            },
             Err(e) => fail("invalid_state", e.to_string()),
         },
-        "stop" => {
-            match app.ipc_stop_and_transcribe(opts).await {
-                Ok((text, duration_ms, output_mode)) => IpcResponse {
-                    id,
-                    ok: true,
-                    result: Some(IpcResult {
-                        state: app.ipc_status().state,
-                        text,
-                        output: format!("{output_mode:?}").to_lowercase(),
-                        duration_ms,
-                        provider: app.ipc_status().provider,
-                        model: app.ipc_status().model,
-                    }),
-                    error: None,
-                },
-                Err(e) => fail("internal", e.to_string()),
-            }
-        }
+        "stop" => match app.ipc_stop_and_transcribe(opts).await {
+            Ok((text, duration_ms, output_mode)) => IpcResponse {
+                id,
+                ok: true,
+                result: Some(IpcResult {
+                    state: app.ipc_status().state,
+                    text,
+                    output: format!("{output_mode:?}").to_lowercase(),
+                    duration_ms,
+                    provider: app.ipc_status().provider,
+                    model: app.ipc_status().model,
+                }),
+                error: None,
+            },
+            Err(e) => fail("internal", e.to_string()),
+        },
         "transcribe" => {
             // If not recording, start and capture until trailing silence
             if !app.is_recording() {
@@ -257,13 +271,25 @@ async fn dispatch_request(app: &mut App, req: IpcRequest) -> IpcResponse {
 pub async fn copy_to_clipboard(text: &str) -> Result<()> {
     // Try wl-copy
     let wl = vec!["wl-copy".to_string()];
-    if crate::command::execute_with_input(&wl, text).await.unwrap_or(-1) == 0 {
+    if crate::command::execute_with_input(&wl, text)
+        .await
+        .unwrap_or(-1)
+        == 0
+    {
         return Ok(());
     }
     // Try xclip if DISPLAY exists
     if std::env::var("DISPLAY").is_ok() {
-        let x = vec!["xclip".to_string(), "-selection".to_string(), "clipboard".to_string()];
-        if crate::command::execute_with_input(&x, text).await.unwrap_or(-1) == 0 {
+        let x = vec![
+            "xclip".to_string(),
+            "-selection".to_string(),
+            "clipboard".to_string(),
+        ];
+        if crate::command::execute_with_input(&x, text)
+            .await
+            .unwrap_or(-1)
+            == 0
+        {
             return Ok(());
         }
     }
@@ -287,13 +313,23 @@ pub async fn type_text(text: &str, nl: TypeNewlines) -> Result<()> {
         "--file".to_string(),
         "-".to_string(),
     ];
-    let code = crate::command::execute_with_input(&y, &mapped).await.unwrap_or(-1);
-    if code == 0 { return Ok(()); }
+    let code = crate::command::execute_with_input(&y, &mapped)
+        .await
+        .unwrap_or(-1);
+    if code == 0 {
+        return Ok(());
+    }
 
     // Try wtype --file - (not all versions support it)
     let w = vec!["wtype".to_string(), "-".to_string()];
-    let code = crate::command::execute_with_input(&w, &mapped).await.unwrap_or(-1);
-    if code == 0 { return Ok(()); }
+    let code = crate::command::execute_with_input(&w, &mapped)
+        .await
+        .unwrap_or(-1);
+    if code == 0 {
+        return Ok(());
+    }
 
-    Err(anyhow!("no_backend: neither ydotool nor wtype available/working"))
+    Err(anyhow!(
+        "no_backend: neither ydotool nor wtype available/working"
+    ))
 }

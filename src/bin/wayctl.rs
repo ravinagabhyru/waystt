@@ -89,11 +89,20 @@ async fn main() -> Result<()> {
                 }),
             )
         }
-        Commands::Transcribe { output, type_newlines, silence_ms } => {
+        Commands::Transcribe {
+            output,
+            type_newlines,
+            silence_ms,
+        } => {
             let mut opts = serde_json::Map::new();
             opts.insert("output".into(), serde_json::Value::String(to_lower(output)));
-            opts.insert("type_newlines".into(), serde_json::Value::String(to_lower(type_newlines)));
-            if let Some(ms) = silence_ms { opts.insert("silence_ms".into(), serde_json::Value::from(ms)); }
+            opts.insert(
+                "type_newlines".into(),
+                serde_json::Value::String(to_lower(type_newlines)),
+            );
+            if let Some(ms) = silence_ms {
+                opts.insert("silence_ms".into(), serde_json::Value::from(ms));
+            }
             ("transcribe", serde_json::Value::Object(opts))
         }
     };
@@ -129,7 +138,10 @@ async fn send(socket: &PathBuf, payload: &str) -> Result<serde_json::Value> {
 }
 
 fn handle_response(v: &serde_json::Value) -> Result<()> {
-    let ok = v.get("ok").and_then(serde_json::Value::as_bool).unwrap_or(false);
+    let ok = v
+        .get("ok")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
     if !ok {
         let err = v.get("error").cloned().unwrap_or_default();
         return Err(anyhow!(format!("error: {err}")));
@@ -144,7 +156,10 @@ fn handle_response(v: &serde_json::Value) -> Result<()> {
     }
     // Print status-like fields for ping/status or empty text
     let state = result.get("state").and_then(|s| s.as_str()).unwrap_or("");
-    let provider = result.get("provider").and_then(|s| s.as_str()).unwrap_or("");
+    let provider = result
+        .get("provider")
+        .and_then(|s| s.as_str())
+        .unwrap_or("");
     let model = result.get("model").and_then(|s| s.as_str()).unwrap_or("");
     let duration = result
         .get("duration_ms")
@@ -165,7 +180,10 @@ fn handle_response(v: &serde_json::Value) -> Result<()> {
         }
     } else {
         // Fallback: print the raw JSON result for visibility
-        println!("{}", serde_json::to_string_pretty(&result).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&result).unwrap_or_default()
+        );
     }
     Ok(())
 }

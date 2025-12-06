@@ -92,7 +92,9 @@ impl App {
             }
 
             // Poll signals with timeout to keep loop responsive
-            match tokio::time::timeout(tokio::time::Duration::from_millis(100), signals.next()).await {
+            match tokio::time::timeout(tokio::time::Duration::from_millis(100), signals.next())
+                .await
+            {
                 Ok(Some(signal)) => {
                     if signal == signals::START_SIG {
                         match state {
@@ -105,7 +107,9 @@ impl App {
                                 if let Err(e) = self.recorder.clear_buffer() {
                                     eprintln!("Failed to clear audio buffer before start: {e}");
                                 }
-                                if let Err(e) = self.beeps.play_async(BeepType::RecordingStart).await {
+                                if let Err(e) =
+                                    self.beeps.play_async(BeepType::RecordingStart).await
+                                {
                                     eprintln!("Warning: Failed to play recording start beep: {e}");
                                 }
                                 if let Err(e) = self.recorder.start_recording() {
@@ -126,7 +130,8 @@ impl App {
                                     eprintln!("Failed to stop recording: {e}");
                                 }
                                 // Play stop beep to signal end of capture
-                                if let Err(e) = self.beeps.play_async(BeepType::RecordingStop).await {
+                                if let Err(e) = self.beeps.play_async(BeepType::RecordingStop).await
+                                {
                                     eprintln!("Warning: Failed to play recording stop beep: {e}");
                                 }
 
@@ -189,7 +194,7 @@ impl App {
                     }
                 }
                 Ok(None) => break, // stream ended
-                Err(_) => {}, // timeout
+                Err(_) => {}       // timeout
             }
         }
 
@@ -270,9 +275,7 @@ impl App {
                     TranscriptionError::NetworkError(details) => {
                         let error_type = &details.error_type;
                         let error_message = &details.error_message;
-                        eprintln!(
-                            "🌐 Network details: {error_type} - {error_message}"
-                        );
+                        eprintln!("🌐 Network details: {error_type} - {error_message}");
                     }
                     TranscriptionError::FileTooLarge(size) => {
                         eprintln!("💡 Audio file too large: {size} bytes (max 25MB)");
@@ -308,7 +311,9 @@ impl App {
 
     // IPC helpers: used by the Unix socket server
     pub(crate) async fn ipc_start(&mut self) -> Result<()> {
-        if let Err(e) = self.recorder.clear_buffer() { eprintln!("Buffer clear failed before start: {e}"); }
+        if let Err(e) = self.recorder.clear_buffer() {
+            eprintln!("Buffer clear failed before start: {e}");
+        }
         if let Err(e) = self.beeps.play_async(BeepType::RecordingStart).await {
             eprintln!("Start beep failed: {e}");
         }
@@ -353,7 +358,11 @@ impl App {
     }
 
     pub(crate) fn ipc_status(&self) -> crate::ipc::IpcResult {
-        let state = if self.recorder.is_recording() { "Recording" } else { "Idle" };
+        let state = if self.recorder.is_recording() {
+            "Recording"
+        } else {
+            "Idle"
+        };
         crate::ipc::IpcResult {
             state: state.to_string(),
             provider: format!("{:?}", self.config.provider_kind()),
@@ -367,7 +376,11 @@ impl App {
         let wav = self.pipeline.to_wav(&processed)?;
         let language_opt = {
             let s = self.config.whisper_language.trim();
-            if s.is_empty() || s.eq_ignore_ascii_case("auto") { None } else { Some(s.to_string()) }
+            if s.is_empty() || s.eq_ignore_ascii_case("auto") {
+                None
+            } else {
+                Some(s.to_string())
+            }
         };
         let text = self
             .pipeline
@@ -417,12 +430,16 @@ impl App {
                 let start_idx = data.len() - win_samples;
                 let window = &data[start_idx..];
                 let rms = proc.calculate_rms(window);
-                if rms > peak_rms { peak_rms = rms; }
+                if rms > peak_rms {
+                    peak_rms = rms;
+                }
                 let threshold = (peak_rms * 0.1).max(0.005);
                 let now = std::time::Instant::now();
 
                 if rms > threshold {
-                    if first_voice_time.is_none() { first_voice_time = Some(now); }
+                    if first_voice_time.is_none() {
+                        first_voice_time = Some(now);
+                    }
                     last_voice_time = Some(now);
                 }
 
@@ -441,7 +458,9 @@ impl App {
 
         // Stop recording without clearing buffer
         let _ = self.recorder.stop_recording();
-        if let Err(e) = self.beeps.play_async(BeepType::RecordingStop).await { eprintln!("Stop beep failed: {e}"); }
+        if let Err(e) = self.beeps.play_async(BeepType::RecordingStop).await {
+            eprintln!("Stop beep failed: {e}");
+        }
         Ok(())
     }
 }

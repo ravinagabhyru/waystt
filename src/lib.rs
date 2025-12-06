@@ -12,8 +12,8 @@ use tokio::io::AsyncWriteExt;
 pub mod app;
 pub mod cli;
 pub mod config;
-pub mod pipeline;
 pub mod ipc;
+pub mod pipeline;
 pub mod signals;
 
 // Re-export existing modules for backward-compatibility and tests
