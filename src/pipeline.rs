@@ -73,7 +73,11 @@ mod tests {
         let sample_rate = 16000u32;
         let p = AudioPipeline::new(sample_rate);
         // silence - speech - silence
-        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        #[allow(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss
+        )]
         let window = (sample_rate as f32 * 0.01) as usize;
         let mut audio = vec![0.0; window];
         audio.extend(vec![0.2; window * 20]);

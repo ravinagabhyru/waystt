@@ -94,9 +94,7 @@ impl BeepPlayer {
         let config = match device.default_output_config() {
             Ok(config) => config,
             Err(e) => {
-                eprintln!(
-                    "Warning: Failed to get audio output config for beeps: {e}"
-                );
+                eprintln!("Warning: Failed to get audio output config for beeps: {e}");
                 return Ok(());
             }
         };
@@ -483,9 +481,7 @@ mod tests {
                 }
                 Err(e) => {
                     if std::env::var("CI").is_err() {
-                        println!(
-                            "Async beep {beep_type:?} failed (expected in test env): {e}"
-                        );
+                        println!("Async beep {beep_type:?} failed (expected in test env): {e}");
                     }
                 }
             }
@@ -519,7 +515,8 @@ mod tests {
     fn test_volume_multipliers() {
         // Test volume multipliers for different beep types
         assert!(
-            (BeepPlayer::get_volume_multiplier(BeepType::RecordingStart) - 2.0).abs() < f32::EPSILON
+            (BeepPlayer::get_volume_multiplier(BeepType::RecordingStart) - 2.0).abs()
+                < f32::EPSILON
         );
         assert!(
             (BeepPlayer::get_volume_multiplier(BeepType::RecordingStop) - 2.0).abs() < f32::EPSILON
@@ -544,8 +541,14 @@ mod tests {
             C4,
             BeepType::RecordingStart,
         );
-        assert!((start_freq - C4).abs() < f32::EPSILON, "Recording start should begin with C major");
-        assert!((end_freq - E4).abs() < f32::EPSILON, "Recording start should end with E major");
+        assert!(
+            (start_freq - C4).abs() < f32::EPSILON,
+            "Recording start should begin with C major"
+        );
+        assert!(
+            (end_freq - E4).abs() < f32::EPSILON,
+            "Recording start should end with E major"
+        );
 
         // Test recording stop: E major then C major (dong ding - symmetrical)
         let start_freq =
@@ -556,8 +559,14 @@ mod tests {
             E4,
             BeepType::RecordingStop,
         );
-        assert!((start_freq - E4).abs() < f32::EPSILON, "Recording stop should begin with E major");
-        assert!((end_freq - C4).abs() < f32::EPSILON, "Recording stop should end with C major");
+        assert!(
+            (start_freq - E4).abs() < f32::EPSILON,
+            "Recording stop should begin with E major"
+        );
+        assert!(
+            (end_freq - C4).abs() < f32::EPSILON,
+            "Recording stop should end with C major"
+        );
 
         // Test success: Double E major (ding ding)
         let first_beep =
@@ -574,8 +583,17 @@ mod tests {
             E4,
             BeepType::Success,
         );
-        assert!((first_beep - E4).abs() < f32::EPSILON, "Success first beep should be E major");
-        assert!(gap_freq.abs() < f32::EPSILON, "Success should have silence in the middle");
-        assert!((second_beep - E4).abs() < f32::EPSILON, "Success second beep should be E major");
+        assert!(
+            (first_beep - E4).abs() < f32::EPSILON,
+            "Success first beep should be E major"
+        );
+        assert!(
+            gap_freq.abs() < f32::EPSILON,
+            "Success should have silence in the middle"
+        );
+        assert!(
+            (second_beep - E4).abs() < f32::EPSILON,
+            "Success second beep should be E major"
+        );
     }
 }

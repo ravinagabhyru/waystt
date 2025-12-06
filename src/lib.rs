@@ -117,9 +117,7 @@ async fn download_model_with_progress(model: &str) -> Result<std::path::PathBuf>
                     0.0
                 };
 
-                print!(
-                    "\r{model}... {percentage:.1}% ({speed:.1} MB/s, ETA: {eta:.0}s)    "
-                );
+                print!("\r{model}... {percentage:.1}% ({speed:.1} MB/s, ETA: {eta:.0}s)    ");
                 std::io::stdout().flush()?;
             }
         } else {
