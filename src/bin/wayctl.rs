@@ -72,6 +72,8 @@ enum OutputMode {
     Stdout,
     Clipboard,
     Type,
+    Wtype,
+    Ydotool,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]

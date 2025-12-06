@@ -362,6 +362,12 @@ impl App {
             crate::ipc::OutputMode::Type => {
                 crate::ipc::type_text(&text, options.type_newlines).await?;
             }
+            crate::ipc::OutputMode::Wtype => {
+                crate::ipc::type_text_wtype(&text, options.type_newlines).await?;
+            }
+            crate::ipc::OutputMode::Ydotool => {
+                crate::ipc::type_text_ydotool(&text, options.type_newlines).await?;
+            }
         }
         let _ = self.recorder.clear_buffer();
         let duration_ms = start.elapsed().as_millis() as u64;
@@ -569,6 +575,19 @@ impl App {
                         crate::ipc::OutputMode::Type => {
                             if let Err(e) = crate::ipc::type_text(&text, type_newlines).await {
                                 eprintln!("[Continuous] Failed to type text: {e}");
+                            }
+                        }
+                        crate::ipc::OutputMode::Wtype => {
+                            if let Err(e) = crate::ipc::type_text_wtype(&text, type_newlines).await
+                            {
+                                eprintln!("[Continuous] Failed to type text with wtype: {e}");
+                            }
+                        }
+                        crate::ipc::OutputMode::Ydotool => {
+                            if let Err(e) =
+                                crate::ipc::type_text_ydotool(&text, type_newlines).await
+                            {
+                                eprintln!("[Continuous] Failed to type text with ydotool: {e}");
                             }
                         }
                     }

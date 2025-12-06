@@ -13,6 +13,8 @@ pub enum OutputMode {
     Stdout,
     Clipboard,
     Type,
+    Wtype,
+    Ydotool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -444,11 +446,49 @@ async fn type_text_chunked_wtype(text: &str) -> Result<()> {
             .await
             .unwrap_or(-1);
         if code != 0 {
-            return Err(anyhow!(
-                "no_backend: neither ydotool nor wtype available/working"
-            ));
+            return Err(anyhow!("wtype failed or not available"));
         }
     }
 
     Ok(())
+}
+
+/// Type text explicitly using wtype
+///
+/// # Errors
+///
+/// Returns an error if wtype is not available or fails
+pub async fn type_text_wtype(text: &str, nl: TypeNewlines) -> Result<()> {
+    let mapped = match nl {
+        TypeNewlines::Spaces => text.replace(['\r', '\n'], " "),
+        TypeNewlines::Enter | TypeNewlines::Literal => text.to_string(),
+    };
+    type_text_chunked_wtype(&mapped).await
+}
+
+/// Type text explicitly using ydotool
+///
+/// # Errors
+///
+/// Returns an error if ydotool is not available or fails
+pub async fn type_text_ydotool(text: &str, nl: TypeNewlines) -> Result<()> {
+    let mapped = match nl {
+        TypeNewlines::Spaces => text.replace(['\r', '\n'], " "),
+        TypeNewlines::Enter | TypeNewlines::Literal => text.to_string(),
+    };
+
+    let y = vec![
+        "ydotool".to_string(),
+        "type".to_string(),
+        "--file".to_string(),
+        "-".to_string(),
+    ];
+    let code = crate::command::execute_with_input(&y, &mapped)
+        .await
+        .unwrap_or(-1);
+    if code == 0 {
+        Ok(())
+    } else {
+        Err(anyhow!("ydotool failed or not available"))
+    }
 }
