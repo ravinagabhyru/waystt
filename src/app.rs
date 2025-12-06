@@ -138,8 +138,8 @@ impl App {
                         eprintln!("Received unexpected signal: {other}");
                     }
                 },
-                Ok(None) => break,  // stream ended
-                Err(_) => {} // timeout
+                Ok(None) => break, // stream ended
+                Err(_) => {}       // timeout
             }
         }
 
@@ -220,9 +220,7 @@ impl App {
                     TranscriptionError::NetworkError(details) => {
                         let error_type = &details.error_type;
                         let error_message = &details.error_message;
-                        eprintln!(
-                            "🌐 Network details: {error_type} - {error_message}"
-                        );
+                        eprintln!("🌐 Network details: {error_type} - {error_message}");
                     }
                     TranscriptionError::FileTooLarge(size) => {
                         eprintln!("💡 Audio file too large: {size} bytes (max 25MB)");

@@ -267,9 +267,7 @@ pub fn bootstrap(envfile: Option<&Path>) -> anyhow::Result<Config> {
             Config::load_env_file(path)?
         } else {
             let display_path = path.display();
-            eprintln!(
-                "Environment file {display_path} not found, using system environment"
-            );
+            eprintln!("Environment file {display_path} not found, using system environment");
             Config::from_env()
         }
     } else {

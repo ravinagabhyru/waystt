@@ -57,9 +57,7 @@ impl AudioRecorder {
             .ok_or_else(|| anyhow!("No default input device available"))?;
 
         let device_name = device.name().unwrap_or("Unknown".to_string());
-        eprintln!(
-            "🎤 Using audio device: {device_name}"
-        );
+        eprintln!("🎤 Using audio device: {device_name}");
 
         // Get supported input config close to our target format
         let mut supported_configs = device.supported_input_configs()?;
@@ -79,9 +77,7 @@ impl AudioRecorder {
 
         let sample_rate = config.sample_rate.0;
         let channels = config.channels;
-        eprintln!(
-            "📊 Audio config: {sample_rate}Hz, {channels} channels"
-        );
+        eprintln!("📊 Audio config: {sample_rate}Hz, {channels} channels");
 
         // Clone buffer for the stream callback
         let buffer_clone = Arc::clone(&self.buffer);
@@ -107,9 +103,7 @@ impl AudioRecorder {
 
                     if old_len == 0 && !audio_buffer.is_empty() {
                         let len = data.len();
-                        eprintln!(
-                            "🎤 First audio samples captured! Got {len} samples"
-                        );
+                        eprintln!("🎤 First audio samples captured! Got {len} samples");
                     }
                 }
             },
