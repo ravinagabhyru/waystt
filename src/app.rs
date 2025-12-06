@@ -72,12 +72,13 @@ impl App {
             RecState::Idle
         } else {
             eprintln!("One-shot mode: starting audio recording...");
-            if let Err(e) = self.beeps.play_async(BeepType::RecordingStart).await {
-                eprintln!("Warning: Failed to play recording start beep: {e}");
-            }
+            // Start recording FIRST, then play beep so we don't miss initial speech
             if let Err(e) = self.recorder.start_recording() {
                 eprintln!("Failed to start recording: {e}");
                 return Ok(1);
+            }
+            if let Err(e) = self.beeps.play_async(BeepType::RecordingStart).await {
+                eprintln!("Warning: Failed to play recording start beep: {e}");
             }
             RecState::Recording
         };
@@ -107,15 +108,18 @@ impl App {
                                 if let Err(e) = self.recorder.clear_buffer() {
                                     eprintln!("Failed to clear audio buffer before start: {e}");
                                 }
-                                if let Err(e) =
-                                    self.beeps.play_async(BeepType::RecordingStart).await
-                                {
-                                    eprintln!("Warning: Failed to play recording start beep: {e}");
-                                }
+                                // Start recording FIRST, then play beep so we don't miss initial speech
                                 if let Err(e) = self.recorder.start_recording() {
                                     eprintln!("Failed to start recording: {e}");
                                 } else {
                                     state = RecState::Recording;
+                                    if let Err(e) =
+                                        self.beeps.play_async(BeepType::RecordingStart).await
+                                    {
+                                        eprintln!(
+                                            "Warning: Failed to play recording start beep: {e}"
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -314,10 +318,11 @@ impl App {
         if let Err(e) = self.recorder.clear_buffer() {
             eprintln!("Buffer clear failed before start: {e}");
         }
+        // Start recording FIRST, then play beep so we don't miss initial speech
+        self.recorder.start_recording()?;
         if let Err(e) = self.beeps.play_async(BeepType::RecordingStart).await {
             eprintln!("Start beep failed: {e}");
         }
-        self.recorder.start_recording()?;
         Ok(())
     }
 

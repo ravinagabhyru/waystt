@@ -296,6 +296,11 @@ pub async fn copy_to_clipboard(text: &str) -> Result<()> {
     Err(anyhow!("no_backend: neither wl-copy nor xclip available"))
 }
 
+/// Chunk size for typing text (characters per chunk)
+const TYPE_CHUNK_SIZE: usize = 50;
+/// Delay between chunks in milliseconds
+const TYPE_CHUNK_DELAY_MS: u64 = 15;
+
 /// Type text using ydotool or wtype
 ///
 /// # Errors
@@ -306,7 +311,8 @@ pub async fn type_text(text: &str, nl: TypeNewlines) -> Result<()> {
         TypeNewlines::Spaces => text.replace(['\r', '\n'], " "),
         TypeNewlines::Enter | TypeNewlines::Literal => text.to_string(),
     };
-    // Try ydotool first
+
+    // Try ydotool first (types all at once, has its own internal delay)
     let y = vec![
         "ydotool".to_string(),
         "type".to_string(),
@@ -320,16 +326,42 @@ pub async fn type_text(text: &str, nl: TypeNewlines) -> Result<()> {
         return Ok(());
     }
 
-    // Try wtype --file - (not all versions support it)
-    let w = vec!["wtype".to_string(), "-".to_string()];
-    let code = crate::command::execute_with_input(&w, &mapped)
-        .await
-        .unwrap_or(-1);
-    if code == 0 {
-        return Ok(());
+    // Try wtype with chunking to prevent character dropping
+    type_text_chunked_wtype(&mapped).await
+}
+
+/// Type text using wtype in chunks with delays between chunks
+async fn type_text_chunked_wtype(text: &str) -> Result<()> {
+    // Split text into chunks of TYPE_CHUNK_SIZE characters
+    let chunks: Vec<String> = text
+        .chars()
+        .collect::<Vec<_>>()
+        .chunks(TYPE_CHUNK_SIZE)
+        .map(|c| c.iter().collect())
+        .collect();
+
+    for (i, chunk) in chunks.iter().enumerate() {
+        // Add delay between chunks (not before the first one)
+        if i > 0 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(TYPE_CHUNK_DELAY_MS)).await;
+        }
+
+        // Use -d 3 for 3ms delay between keystrokes within the chunk
+        let w = vec![
+            "wtype".to_string(),
+            "-d".to_string(),
+            "3".to_string(),
+            "-".to_string(),
+        ];
+        let code = crate::command::execute_with_input(&w, chunk)
+            .await
+            .unwrap_or(-1);
+        if code != 0 {
+            return Err(anyhow!(
+                "no_backend: neither ydotool nor wtype available/working"
+            ));
+        }
     }
 
-    Err(anyhow!(
-        "no_backend: neither ydotool nor wtype available/working"
-    ))
+    Ok(())
 }
