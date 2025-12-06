@@ -32,6 +32,12 @@ pub struct IpcOptions {
     pub type_newlines: TypeNewlines,
     #[serde(default)]
     pub silence_ms: Option<u64>,
+    /// Silence threshold in ms for continuous mode chunk extraction
+    #[serde(default)]
+    pub continuous_silence_ms: Option<u64>,
+    /// Number of parallel transcription workers for continuous mode (1-4)
+    #[serde(default)]
+    pub continuous_workers: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,10 +130,28 @@ pub async fn serve(mut app: App, socket_path: PathBuf) -> Result<()> {
     eprintln!("✅ waystt IPC listening on {}", socket_path.display());
 
     loop {
-        let (stream, _) = listener.accept().await?;
-        // Handle connections sequentially to avoid reentrancy for now
-        if let Err(e) = handle_connection(stream, &mut app).await {
-            eprintln!("IPC connection error: {e}");
+        // Use select! to handle both IPC connections and continuous mode processing
+        tokio::select! {
+            accept_result = listener.accept() => {
+                match accept_result {
+                    Ok((stream, _)) => {
+                        // Handle connections sequentially to avoid reentrancy for now
+                        if let Err(e) = handle_connection(stream, &mut app).await {
+                            eprintln!("IPC connection error: {e}");
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Accept error: {e}");
+                    }
+                }
+            }
+            // Process continuous mode audio every 50ms
+            _ = tokio::time::sleep(tokio::time::Duration::from_millis(50)) => {
+                // Process continuous mode if active
+                if let Err(e) = app.ipc_continuous_process().await {
+                    eprintln!("Continuous processing error: {e}");
+                }
+            }
         }
     }
 }
@@ -257,6 +281,69 @@ async fn dispatch_request(app: &mut App, req: IpcRequest) -> IpcResponse {
                     error: None,
                 },
                 Err(e) => fail("internal", e.to_string()),
+            }
+        }
+        "continuous_start" => {
+            // Start continuous speech recognition mode
+            match app.ipc_continuous_start(opts).await {
+                Ok(()) => IpcResponse {
+                    id,
+                    ok: true,
+                    result: Some(IpcResult {
+                        state: "Continuous".to_string(),
+                        ..IpcResult::default()
+                    }),
+                    error: None,
+                },
+                Err(e) => fail("invalid_state", e.to_string()),
+            }
+        }
+        "continuous_stop" => {
+            // Stop continuous mode and return stats
+            match app.ipc_continuous_stop().await {
+                Ok(stats) => IpcResponse {
+                    id,
+                    ok: true,
+                    result: Some(IpcResult {
+                        state: "Idle".to_string(),
+                        text: format!(
+                            "Captured {} chunks, transcribed {}, failed {}, total {:.1}s audio",
+                            stats.chunks_captured,
+                            stats.chunks_transcribed,
+                            stats.chunks_failed,
+                            stats.total_audio_seconds
+                        ),
+                        ..IpcResult::default()
+                    }),
+                    error: None,
+                },
+                Err(e) => fail("invalid_state", e.to_string()),
+            }
+        }
+        "continuous_status" => {
+            // Get continuous mode status
+            let continuous_state = app.ipc_continuous_status();
+            let state_str = match continuous_state {
+                Some(crate::continuous::ContinuousState::Running) => "ContinuousRunning",
+                Some(crate::continuous::ContinuousState::Stopping) => "ContinuousStopping",
+                Some(crate::continuous::ContinuousState::Stopped) | None => {
+                    if app.is_recording() {
+                        "Recording"
+                    } else {
+                        "Idle"
+                    }
+                }
+            };
+            IpcResponse {
+                id,
+                ok: true,
+                result: Some(IpcResult {
+                    state: state_str.to_string(),
+                    provider: app.ipc_status().provider,
+                    model: app.ipc_status().model,
+                    ..IpcResult::default()
+                }),
+                error: None,
             }
         }
         _ => fail("unknown_cmd", format!("Unknown command: {cmd}")),

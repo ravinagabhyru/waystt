@@ -45,6 +45,26 @@ enum Commands {
     },
     /// Cancel recording (no transcription)
     Cancel,
+    /// Start continuous speech recognition mode
+    #[command(name = "continuous-start")]
+    ContinuousStart {
+        /// Silence threshold (ms) to chunk audio (default 700)
+        #[arg(long)]
+        silence_ms: Option<u64>,
+        /// Number of parallel transcription workers (1-4, default 2)
+        #[arg(long)]
+        workers: Option<u32>,
+        #[arg(long, value_enum, default_value_t = OutputMode::Stdout)]
+        output: OutputMode,
+        #[arg(long, value_enum, default_value_t = TypeNewlines::Spaces)]
+        type_newlines: TypeNewlines,
+    },
+    /// Stop continuous speech recognition mode
+    #[command(name = "continuous-stop")]
+    ContinuousStop,
+    /// Get continuous mode status
+    #[command(name = "continuous-status")]
+    ContinuousStatus,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
@@ -105,6 +125,28 @@ async fn main() -> Result<()> {
             }
             ("transcribe", serde_json::Value::Object(opts))
         }
+        Commands::ContinuousStart {
+            silence_ms,
+            workers,
+            output,
+            type_newlines,
+        } => {
+            let mut opts = serde_json::Map::new();
+            opts.insert("output".into(), serde_json::Value::String(to_lower(output)));
+            opts.insert(
+                "type_newlines".into(),
+                serde_json::Value::String(to_lower(type_newlines)),
+            );
+            if let Some(ms) = silence_ms {
+                opts.insert("continuous_silence_ms".into(), serde_json::Value::from(ms));
+            }
+            if let Some(w) = workers {
+                opts.insert("continuous_workers".into(), serde_json::Value::from(w));
+            }
+            ("continuous_start", serde_json::Value::Object(opts))
+        }
+        Commands::ContinuousStop => ("continuous_stop", json!({})),
+        Commands::ContinuousStatus => ("continuous_status", json!({})),
     };
 
     let id = Uuid::new_v4().to_string();

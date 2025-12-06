@@ -12,6 +12,7 @@ use tokio::io::AsyncWriteExt;
 pub mod app;
 pub mod cli;
 pub mod config;
+pub mod continuous;
 pub mod ipc;
 pub mod pipeline;
 pub mod signals;

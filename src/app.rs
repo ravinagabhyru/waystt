@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use futures::stream::StreamExt;
 
@@ -6,6 +8,7 @@ use crate::beep::{BeepConfig, BeepPlayer, BeepType};
 use crate::cli::RunOptions;
 use crate::command;
 use crate::config::Config;
+use crate::continuous::{ContinuousConfig, ContinuousModeController, ContinuousState};
 use crate::pipeline::AudioPipeline;
 use crate::signals;
 use crate::transcription::{TranscriptionError, TranscriptionProvider};
@@ -14,10 +17,12 @@ pub struct App {
     config: Config,
     recorder: AudioRecorder,
     beeps: BeepPlayer,
-    pipeline: AudioPipeline,
-    provider: Box<dyn TranscriptionProvider>,
+    pipeline: Arc<AudioPipeline>,
+    provider: Arc<dyn TranscriptionProvider>,
     pipe_to: Option<Vec<String>>,
     daemon: bool,
+    /// Controller for continuous speech recognition mode
+    continuous: Option<ContinuousModeController>,
 }
 
 impl App {
@@ -38,16 +43,17 @@ impl App {
         };
         let beeps = BeepPlayer::new(beep_config)?;
         let recorder = AudioRecorder::new()?;
-        let pipeline = AudioPipeline::new(config.audio_sample_rate);
+        let pipeline = Arc::new(AudioPipeline::new(config.audio_sample_rate));
 
         Ok(Self {
             config,
             recorder,
             beeps,
             pipeline,
-            provider,
+            provider: Arc::from(provider),
             pipe_to: options.pipe_to,
             daemon: options.daemon,
+            continuous: None,
         })
     }
 
@@ -467,5 +473,165 @@ impl App {
             eprintln!("Stop beep failed: {e}");
         }
         Ok(())
+    }
+
+    /// Start continuous speech recognition mode
+    ///
+    /// Continuously captures audio, detects silence gaps, and transcribes
+    /// chunks in the background. Results are output in capture order.
+    #[allow(clippy::cast_possible_truncation)]
+    pub(crate) async fn ipc_continuous_start(
+        &mut self,
+        options: crate::ipc::IpcOptions,
+    ) -> Result<()> {
+        // Check if already in continuous mode
+        if let Some(ref controller) = self.continuous {
+            if controller.state() != ContinuousState::Stopped {
+                return Err(anyhow::anyhow!("Continuous mode already running"));
+            }
+        }
+
+        // Create continuous config from options
+        let config = ContinuousConfig {
+            min_speech_ms: 300,
+            silence_threshold_ms: options.continuous_silence_ms.unwrap_or(700),
+            max_chunk_ms: 30_000,
+            worker_count: options.continuous_workers.unwrap_or(2).clamp(1, 4) as usize,
+            max_queue_size: 10,
+            sample_rate: self.config.audio_sample_rate,
+        };
+
+        // Clear buffer and start recording
+        if let Err(e) = self.recorder.clear_buffer() {
+            eprintln!("Buffer clear failed before continuous start: {e}");
+        }
+        self.recorder.start_recording()?;
+
+        // Play start beep
+        if let Err(e) = self.beeps.play_async(BeepType::RecordingStart).await {
+            eprintln!("Start beep failed: {e}");
+        }
+
+        // Get language setting
+        let language = {
+            let s = self.config.whisper_language.trim();
+            if s.is_empty() || s.eq_ignore_ascii_case("auto") {
+                None
+            } else {
+                Some(s.to_string())
+            }
+        };
+
+        // Create and start controller
+        let mut controller = ContinuousModeController::new(config);
+        let mut output_rx = controller
+            .start(
+                Arc::clone(&self.pipeline),
+                Arc::clone(&self.provider),
+                language,
+            )
+            .await?;
+
+        self.continuous = Some(controller);
+
+        // Spawn task to handle output
+        let pipe_to = self.pipe_to.clone();
+        let output_mode = options.output;
+        let type_newlines = options.type_newlines;
+        tokio::spawn(async move {
+            while let Some(text) = output_rx.recv().await {
+                if text.is_empty() {
+                    continue;
+                }
+                eprintln!("[Continuous] Transcribed: \"{text}\"");
+                if let Some(ref cmd) = pipe_to {
+                    match crate::command::execute_with_input(cmd, &text).await {
+                        Ok(code) => {
+                            if code != 0 {
+                                eprintln!("[Continuous] Pipe command exited with code {code}");
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("[Continuous] Failed to execute pipe command: {e}");
+                        }
+                    }
+                } else {
+                    // Use output mode from options
+                    match output_mode {
+                        crate::ipc::OutputMode::Stdout => {
+                            println!("{text}");
+                        }
+                        crate::ipc::OutputMode::Clipboard => {
+                            if let Err(e) = crate::ipc::copy_to_clipboard(&text).await {
+                                eprintln!("[Continuous] Failed to copy to clipboard: {e}");
+                            }
+                        }
+                        crate::ipc::OutputMode::Type => {
+                            if let Err(e) = crate::ipc::type_text(&text, type_newlines).await {
+                                eprintln!("[Continuous] Failed to type text: {e}");
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        eprintln!("[Continuous] Started continuous speech recognition");
+        Ok(())
+    }
+
+    /// Process continuous mode audio (call this in the IPC server loop)
+    pub(crate) async fn ipc_continuous_process(&mut self) -> Result<bool> {
+        let Some(ref mut controller) = self.continuous else {
+            return Ok(false);
+        };
+
+        if controller.state() != ContinuousState::Running {
+            return Ok(false);
+        }
+
+        controller.process_audio(&self.recorder).await
+    }
+
+    /// Stop continuous speech recognition mode
+    ///
+    /// Waits for all pending transcriptions to complete and returns stats.
+    pub(crate) async fn ipc_continuous_stop(
+        &mut self,
+    ) -> Result<crate::continuous::ContinuousStats> {
+        let Some(ref mut controller) = self.continuous else {
+            return Err(anyhow::anyhow!("Continuous mode not running"));
+        };
+
+        // Stop recording
+        let _ = self.recorder.stop_recording();
+
+        // Play stop beep
+        if let Err(e) = self.beeps.play_async(BeepType::RecordingStop).await {
+            eprintln!("Stop beep failed: {e}");
+        }
+
+        // Stop the controller and wait for completion
+        let stats = controller.stop(&self.recorder).await?;
+
+        // Clean up
+        self.continuous = None;
+
+        // Play success beep
+        if let Err(e) = self.beeps.play_async(BeepType::Success).await {
+            eprintln!("Success beep failed: {e}");
+        }
+
+        eprintln!(
+            "[Continuous] Stopped. Captured {} chunks, transcribed {}, failed {}",
+            stats.chunks_captured, stats.chunks_transcribed, stats.chunks_failed
+        );
+
+        Ok(stats)
+    }
+
+    /// Get status of continuous mode
+    pub(crate) fn ipc_continuous_status(&self) -> Option<ContinuousState> {
+        self.continuous.as_ref().map(|c| c.state())
     }
 }

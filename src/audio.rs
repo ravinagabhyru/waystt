@@ -187,6 +187,51 @@ impl AudioRecorder {
         Ok(buffer.len() as f32 / SAMPLE_RATE as f32)
     }
 
+    /// Get the current buffer length in samples without cloning the data
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if acquiring the buffer lock fails
+    pub fn buffer_len(&self) -> Result<usize> {
+        let buffer = self
+            .buffer
+            .lock()
+            .map_err(|_| anyhow!("Failed to lock buffer"))?;
+        Ok(buffer.len())
+    }
+
+    /// Drain the first `count` samples from the buffer, returning them.
+    /// This allows extracting chunks without clearing the entire buffer.
+    /// Recording can continue while this is called.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if acquiring the buffer lock fails
+    pub fn drain_samples(&self, count: usize) -> Result<Vec<f32>> {
+        let mut buffer = self
+            .buffer
+            .lock()
+            .map_err(|_| anyhow!("Failed to lock buffer"))?;
+        let drain_count = count.min(buffer.len());
+        let drained: Vec<f32> = buffer.drain(0..drain_count).collect();
+        Ok(drained)
+    }
+
+    /// Peek at the last N samples without draining them.
+    /// Used for silence detection on the live buffer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if acquiring the buffer lock fails
+    pub fn peek_tail(&self, count: usize) -> Result<Vec<f32>> {
+        let buffer = self
+            .buffer
+            .lock()
+            .map_err(|_| anyhow!("Failed to lock buffer"))?;
+        let start = buffer.len().saturating_sub(count);
+        Ok(buffer[start..].to_vec())
+    }
+
     /// Process audio events (no-op for CPAL compatibility)
     ///
     /// # Errors
@@ -345,5 +390,31 @@ mod tests {
 
         // Test that process_audio_events doesn't fail
         assert!(recorder.process_audio_events().is_ok());
+    }
+
+    #[test]
+    fn test_buffer_len() {
+        let recorder = AudioRecorder::new().unwrap();
+
+        // Initially empty
+        assert_eq!(recorder.buffer_len().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_drain_samples_empty() {
+        let recorder = AudioRecorder::new().unwrap();
+
+        // Draining from empty buffer returns empty vec
+        let drained = recorder.drain_samples(100).unwrap();
+        assert!(drained.is_empty());
+    }
+
+    #[test]
+    fn test_peek_tail_empty() {
+        let recorder = AudioRecorder::new().unwrap();
+
+        // Peeking empty buffer returns empty vec
+        let tail = recorder.peek_tail(100).unwrap();
+        assert!(tail.is_empty());
     }
 }
