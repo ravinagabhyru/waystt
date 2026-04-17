@@ -1,10 +1,12 @@
 use clap::Parser;
 
-use waystt::cli::{default_envfile_path, RunOptions};
+use waystt::cli::{default_envfile_path, RunMode, RunOptions};
 
 #[derive(Parser)]
 #[command(name = "waystt")]
-#[command(about = "Wayland Speech-to-Text Tool - Signal-driven transcription")]
+#[command(
+    about = "Wayland Speech-to-Text Tool - IPC daemon with optional continuous capture mode"
+)]
 #[command(version)]
 struct Args {
     /// Path to environment file
@@ -22,23 +24,27 @@ struct Args {
     #[arg(long)]
     download_model: bool,
 
-    /// Run as a long-lived daemon controlled by signals
-    /// - SIGUSR2: start recording
-    /// - SIGUSR1: stop + transcribe
-    /// - SIGTERM: shutdown
-    #[arg(long, short = 'd')]
-    daemon: bool,
+    /// Start capturing audio immediately and stream utterances until
+    /// SIGTERM / SIGINT. When omitted, waystt runs as an IPC daemon waiting
+    /// for wayctl commands on its Unix socket.
+    #[arg(long, short = 'c')]
+    continuous: bool,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let envfile = args.envfile.or_else(|| Some(default_envfile_path()));
+    let mode = if args.continuous {
+        RunMode::Continuous
+    } else {
+        RunMode::Daemon
+    };
     let options = RunOptions {
         envfile,
         pipe_to: args.pipe_to,
         download_model: args.download_model,
-        daemon: args.daemon,
+        mode,
     };
 
     let code = waystt::run(options).await?;

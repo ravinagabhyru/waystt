@@ -6,12 +6,11 @@ use futures::stream::StreamExt;
 use crate::audio::AudioRecorder;
 use crate::beep::{BeepConfig, BeepPlayer, BeepType};
 use crate::cli::RunOptions;
-use crate::command;
 use crate::config::Config;
 use crate::continuous::{ContinuousConfig, ContinuousModeController, ContinuousState};
 use crate::pipeline::AudioPipeline;
 use crate::signals;
-use crate::transcription::{TranscriptionError, TranscriptionProvider};
+use crate::transcription::{StreamingTranscriptionProvider, TranscriptionProvider};
 
 pub struct App {
     config: Config,
@@ -19,8 +18,10 @@ pub struct App {
     beeps: BeepPlayer,
     pipeline: Arc<AudioPipeline>,
     provider: Arc<dyn TranscriptionProvider>,
+    /// Streaming provider, when the configured kind/model supports it
+    /// (currently only Parakeet EOU). `None` for batch-only providers.
+    streaming_provider: Option<Arc<dyn StreamingTranscriptionProvider>>,
     pipe_to: Option<Vec<String>>,
-    daemon: bool,
     /// Controller for continuous speech recognition mode
     continuous: Option<ContinuousModeController>,
 }
@@ -31,11 +32,11 @@ impl App {
     /// # Errors
     ///
     /// Returns an error if audio devices cannot be initialized or configured
-    #[allow(clippy::unused_async)]
     pub async fn init(
         options: RunOptions,
         config: Config,
         provider: Box<dyn TranscriptionProvider>,
+        streaming_provider: Option<Arc<dyn StreamingTranscriptionProvider>>,
     ) -> Result<Self> {
         let beep_config = BeepConfig {
             enabled: config.enable_audio_feedback,
@@ -45,274 +46,100 @@ impl App {
         let recorder = AudioRecorder::new()?;
         let pipeline = Arc::new(AudioPipeline::new(config.audio_sample_rate));
 
+        // Eager model load for streaming providers so first-utterance latency
+        // is paid at startup rather than on the user's first utterance.
+        #[cfg(feature = "parakeet")]
+        if streaming_provider.is_some()
+            && config.provider_kind() == crate::transcription::ProviderKind::Parakeet
+            && crate::transcription::parakeet::ParakeetModelType::parse(&config.parakeet_model_type)
+                == crate::transcription::parakeet::ParakeetModelType::EOU
+        {
+            eprintln!("Pre-loading Parakeet EOU model...");
+            let model_path = if let Some(ref custom_path) = config.parakeet_model_path {
+                std::path::PathBuf::from(custom_path)
+            } else {
+                crate::config::Config::parakeet_model_path(&config.parakeet_model_type)
+            };
+            let provider_for_warmup =
+                crate::transcription::parakeet_streaming::ParakeetStreamingProvider::new(
+                    &model_path,
+                )?;
+            if let Err(e) = provider_for_warmup.warm_up() {
+                eprintln!(
+                    "Warning: Parakeet EOU warm-up failed: {e}. First utterance may be slower."
+                );
+            }
+        }
+
         Ok(Self {
             config,
             recorder,
             beeps,
             pipeline,
             provider: Arc::from(provider),
+            streaming_provider,
             pipe_to: options.pipe_to,
-            daemon: options.daemon,
             continuous: None,
         })
     }
 
-    /// Run the application main loop
+    /// Run the app in continuous mode: start capturing immediately, stream
+    /// utterances to the configured output, and shut down on SIGTERM / SIGINT.
     ///
     /// # Errors
     ///
-    /// Returns an error if signal handling fails or audio recording cannot be started
-    #[allow(clippy::too_many_lines)]
-    pub async fn run(mut self) -> Result<i32> {
-        // App state machine modes
-        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-        enum RecState {
-            Idle,
-            Recording,
+    /// Returns an error if signal registration or recording setup fails.
+    pub async fn run_continuous(mut self) -> Result<i32> {
+        eprintln!("waystt - Wayland Speech-to-Text Tool (continuous mode)");
+
+        let opts = crate::ipc::IpcOptions::default();
+        if let Err(e) = self.ipc_continuous_start(opts).await {
+            eprintln!("Failed to start continuous mode: {e}");
+            return Ok(1);
         }
 
-        eprintln!("waystt - Wayland Speech-to-Text Tool");
-
-        let mut state = if self.daemon {
-            eprintln!("Daemon mode: waiting for SIGUSR2 to start recording");
-            RecState::Idle
-        } else {
-            eprintln!("One-shot mode: starting audio recording...");
-            // Start recording FIRST, then play beep so we don't miss initial speech
-            if let Err(e) = self.recorder.start_recording() {
-                eprintln!("Failed to start recording: {e}");
-                return Ok(1);
-            }
-            if let Err(e) = self.beeps.play_async(BeepType::RecordingStart).await {
-                eprintln!("Warning: Failed to play recording start beep: {e}");
-            }
-            RecState::Recording
-        };
-
-        // Signals
         let mut signals = signals::build_signal_stream()?;
 
         loop {
-            // Drive background audio events
             if let Err(e) = self.recorder.process_audio_events() {
                 eprintln!("Audio event processing error: {e}");
             }
 
-            // Poll signals with timeout to keep loop responsive
-            match tokio::time::timeout(tokio::time::Duration::from_millis(100), signals.next())
-                .await
-            {
-                Ok(Some(signal)) => {
-                    if signal == signals::START_SIG {
-                        match state {
-                            RecState::Recording => {
-                                eprintln!("SIGUSR2 received but already recording; ignoring");
-                            }
-                            RecState::Idle => {
-                                eprintln!("Received SIGUSR2: Starting recording");
-                                // Ensure fresh buffer
-                                if let Err(e) = self.recorder.clear_buffer() {
-                                    eprintln!("Failed to clear audio buffer before start: {e}");
-                                }
-                                // Start recording FIRST, then play beep so we don't miss initial speech
-                                if let Err(e) = self.recorder.start_recording() {
-                                    eprintln!("Failed to start recording: {e}");
-                                } else {
-                                    state = RecState::Recording;
-                                    if let Err(e) =
-                                        self.beeps.play_async(BeepType::RecordingStart).await
-                                    {
-                                        eprintln!(
-                                            "Warning: Failed to play recording start beep: {e}"
-                                        );
-                                    }
-                                }
-                            }
+            tokio::select! {
+                maybe_sig = signals.next() => {
+                    match maybe_sig {
+                        Some(sig) if signals::is_shutdown_signal(sig) => {
+                            eprintln!("Received shutdown signal: exiting continuous mode");
+                            break;
                         }
-                    } else if signal == signals::TRANSCRIBE_SIG {
-                        match state {
-                            RecState::Idle => {
-                                eprintln!("SIGUSR1 received while idle; nothing to transcribe");
-                            }
-                            RecState::Recording => {
-                                // Stop recording for processing
-                                if let Err(e) = self.recorder.stop_recording() {
-                                    eprintln!("Failed to stop recording: {e}");
-                                }
-                                // Play stop beep to signal end of capture
-                                if let Err(e) = self.beeps.play_async(BeepType::RecordingStop).await
-                                {
-                                    eprintln!("Warning: Failed to play recording stop beep: {e}");
-                                }
-
-                                let duration = self
-                                    .recorder
-                                    .get_recording_duration_seconds()
-                                    .unwrap_or_default();
-                                eprintln!(
-                                    "Received SIGUSR1: Starting transcription for {duration:.2}s buffer"
-                                );
-
-                                let audio_data = match self.recorder.get_audio_data() {
-                                    Ok(d) => d,
-                                    Err(e) => {
-                                        eprintln!("Failed to get audio data: {e}");
-                                        if self.daemon {
-                                            state = RecState::Idle;
-                                            continue;
-                                        }
-                                        return Ok(1);
-                                    }
-                                };
-
-                                let res = self.process_and_transcribe(audio_data).await;
-
-                                // Clear buffer to free memory regardless of outcome
-                                if let Err(e) = self.recorder.clear_buffer() {
-                                    eprintln!("Failed to clear audio buffer: {e}");
-                                }
-
-                                if let Ok(code) = res {
-                                    if self.daemon {
-                                        state = RecState::Idle;
-                                        // stay alive for next cycle
-                                    } else {
-                                        return Ok(code);
-                                    }
-                                } else if self.daemon {
-                                    state = RecState::Idle;
-                                } else {
-                                    return Ok(1);
-                                }
-                            }
+                        Some(other) => {
+                            eprintln!("Ignoring unexpected signal: {other}");
                         }
-                    } else if signal == signals::SHUTDOWN_SIG {
-                        eprintln!("Received SIGTERM: Shutting down gracefully");
-                        if let Err(e) = self.recorder.stop_recording() {
-                            eprintln!("Failed to stop recording: {e}");
-                        }
-                        // Play stop beep on shutdown as well
-                        if let Err(e) = self.beeps.play_async(BeepType::RecordingStop).await {
-                            eprintln!("Warning: Failed to play recording stop beep: {e}");
-                        }
-                        if let Err(e) = self.recorder.clear_buffer() {
-                            eprintln!("Failed to clear audio buffer during shutdown: {e}");
-                        }
-                        return Ok(0);
-                    } else {
-                        eprintln!("Received unexpected signal: {signal}");
+                        None => break,
                     }
                 }
-                Ok(None) => break, // stream ended
-                Err(_) => {}       // timeout
+                // Drive continuous-mode processing on a short interval.
+                () = tokio::time::sleep(tokio::time::Duration::from_millis(50)) => {
+                    if let Err(e) = self.ipc_continuous_process().await {
+                        eprintln!("Continuous processing error: {e}");
+                    }
+                }
             }
         }
 
-        eprintln!("Exiting waystt");
+        match self.ipc_continuous_stop().await {
+            Ok(stats) => {
+                eprintln!(
+                    "Continuous mode stopped. Captured {} utterances ({:.1}s of audio).",
+                    stats.chunks_captured, stats.total_audio_seconds
+                );
+            }
+            Err(e) => {
+                eprintln!("Failed to stop continuous mode cleanly: {e}");
+                return Ok(1);
+            }
+        }
         Ok(0)
-    }
-
-    async fn process_and_transcribe(&self, audio_data: Vec<f32>) -> Result<i32> {
-        let len = audio_data.len();
-        eprintln!("Processing audio: {len} samples");
-
-        // Preprocess
-        let processed = match self.pipeline.preprocess(&audio_data) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("Audio processing failed: {e}");
-                let _ = self.beeps.play_async(BeepType::Error).await;
-                return Ok(1);
-            }
-        };
-
-        // Encode WAV
-        let wav = match self.pipeline.to_wav(&processed) {
-            Ok(w) => w,
-            Err(e) => {
-                eprintln!("Failed to encode WAV: {e}");
-                return Ok(1);
-            }
-        };
-
-        // Transcribe
-        // Normalize language: treat "auto" or empty as None for providers like OpenAI
-        let language_opt = {
-            let s = self.config.whisper_language.trim();
-            if s.is_empty() || s.eq_ignore_ascii_case("auto") {
-                None
-            } else {
-                Some(s.to_string())
-            }
-        };
-
-        match self
-            .pipeline
-            .transcribe(wav, self.provider.as_ref(), language_opt)
-            .await
-        {
-            Ok(text) => {
-                if text.is_empty() {
-                    println!();
-                    let _ = self.beeps.play_async(BeepType::Success).await;
-                    return Ok(0);
-                }
-                eprintln!("Transcription successful: \"{text}\"");
-                let exit_code = if let Some(cmd) = &self.pipe_to {
-                    match command::execute_with_input(cmd, &text).await {
-                        Ok(code) => code,
-                        Err(e) => {
-                            eprintln!("Failed to execute pipe command: {e}");
-                            let _ = self.beeps.play_async(BeepType::Error).await;
-                            1
-                        }
-                    }
-                } else {
-                    println!("{text}");
-                    0
-                };
-                let _ = self.beeps.play_async(BeepType::Success).await;
-                Ok(exit_code)
-            }
-            Err(e) => {
-                eprintln!("❌ Transcription failed: {e}");
-                let _ = self.beeps.play_async(BeepType::Error).await;
-                // Provide helpful hints based on error type (minimal version)
-                match &e {
-                    TranscriptionError::AuthenticationFailed { provider, .. } => {
-                        eprintln!("💡 Check your {provider} API key configuration");
-                    }
-                    TranscriptionError::NetworkError(details) => {
-                        let error_type = &details.error_type;
-                        let error_message = &details.error_message;
-                        eprintln!("🌐 Network details: {error_type} - {error_message}");
-                    }
-                    TranscriptionError::FileTooLarge(size) => {
-                        eprintln!("💡 Audio file too large: {size} bytes (max 25MB)");
-                    }
-                    TranscriptionError::ConfigurationError(_) => {
-                        eprintln!("💡 Check your transcription provider configuration");
-                    }
-                    TranscriptionError::UnsupportedProvider(provider) => {
-                        eprintln!(
-                            "💡 Unsupported provider: {provider}. Check TRANSCRIPTION_PROVIDER setting"
-                        );
-                    }
-                    TranscriptionError::ApiError(details) => {
-                        if let Some(status) = details.status_code {
-                            eprintln!("📡 API Response: HTTP {status}");
-                        }
-                        if let Some(code) = &details.error_code {
-                            eprintln!("🏷️  Error Code: {code}");
-                        }
-                    }
-                    TranscriptionError::JsonError(_) => {
-                        eprintln!("💡 Failed to parse API response");
-                    }
-                }
-                Ok(1)
-            }
-        }
     }
 
     pub(crate) fn is_recording(&self) -> bool {
@@ -545,6 +372,7 @@ impl App {
             .start(
                 Arc::clone(&self.pipeline),
                 Arc::clone(&self.provider),
+                self.streaming_provider.as_ref().map(Arc::clone),
                 language,
             )
             .await?;

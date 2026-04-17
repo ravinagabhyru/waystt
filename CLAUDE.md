@@ -1,7 +1,20 @@
 ## Project Overview
 
-waystt is a Wayland speech-to-text tool that outputs transcribed text to stdout:
-- **SIGUSR1**: Transcribe audio and output text to stdout (for piping to other tools)
+waystt is a Wayland speech-to-text tool that emits transcribed text to stdout
+or a configurable output sink (clipboard / typed keystrokes / piped command).
+It runs in one of two modes:
+- **Daemon** (default): listens on a Unix socket for `wayctl` commands.
+  Hotkeys should call `wayctl stop-and-transcribe` or `wayctl continuous-start`
+  instead of sending signals.
+- **Continuous** (`waystt --continuous`): starts capturing audio on launch
+  and streams finalized utterances to the configured output until SIGTERM /
+  SIGINT / Ctrl-C. When `PARAKEET_MODEL_TYPE=eou`, utterances are segmented
+  by the model's own end-of-utterance detection for the lowest latency.
+
+### Historical note (breaking change)
+waystt previously used SIGUSR1 / SIGUSR2 as a control channel. Those signals
+are no longer handled. Any hotkey or script that relied on them must be
+migrated to `wayctl` subcommands. SIGTERM and SIGINT still shut down cleanly.
 
 ## Audio Feedback System
 
@@ -97,29 +110,50 @@ async fn test_name() {
 
 ## QA Testing Workflow
 
-- For QAing, run the app with `nohup` and `&` to properly detach from terminal:
+### Daemon mode (wayctl-controlled)
+- Launch detached:
   ```bash
-  # Using production config (~/.config/waystt/.env)
-  nohup ./target/release/waystt > /tmp/waystt.log 2>&1 & disown
-  
-  # Or during development using project-local .env file
   nohup ./target/release/waystt --envfile .env > /tmp/waystt.log 2>&1 & disown
   ```
-- Then:
-  - Listen for "ding dong" sound confirming recording started
-  - Ask the user to speak something
-  - Wait 5 seconds
-  - Run `pkill --signal SIGUSR1 waystt` to trigger transcription and stdout output
-  - Listen for "dong ding" (recording stopped) then "ding ding" (success) sounds
-  - Check logs with `tail /tmp/waystt.log`
-  - The transcribed text will be output to stdout and can be captured or piped to other tools
+- Drive with `wayctl` from a separate shell:
+  - `wayctl start` — begin recording (listen for the start beep)
+  - speak a few seconds
+  - `wayctl stop-and-transcribe` — stop + transcribe + emit
+  - or `wayctl transcribe` — auto-detect trailing silence and transcribe
+- For streaming continuous capture under the daemon:
+  - `wayctl continuous-start` — utterances stream to stdout / clipboard / typed
+  - `wayctl continuous-stop` — flushes and emits stats
+- Tail logs: `tail -f /tmp/waystt.log`
+
+### Continuous mode (no daemon)
+```bash
+nohup ./target/release/waystt --continuous --envfile .env > /tmp/waystt.log 2>&1 & disown
+```
+- Start beep plays on launch, utterances appear on stdout as they finalize
+- `pkill -SIGTERM waystt` (or Ctrl-C if attached) for clean shutdown — expect
+  the stop beep and a final stats line
+
+### Streaming Parakeet smoke test
+1. `TRANSCRIPTION_PROVIDER=parakeet` and `PARAKEET_MODEL_TYPE=eou` in `.env`
+2. Ensure EOU model files (`encoder.onnx`, `decoder_joint.onnx`, `tokenizer.json`)
+   exist under `~/.local/share/applications/waystt/parakeet/eou/`
+3. `waystt --continuous --envfile .env` — expect a single "Pre-loading Parakeet
+   EOU model..." log line at startup (warm-up), then instant first-utterance
+   latency
+4. Speak two sentences separated by ~1 second of silence; confirm two separate
+   stdout lines (not one merged blob)
 
 ## Configuration Files
 
 Key files for future development:
-- `src/main.rs`: Main application logic, signal handling, audio feedback integration
+- `src/lib.rs`: Library entrypoint; picks between daemon IPC and continuous mode
+- `src/app.rs`: App orchestration (init, continuous run loop, IPC handlers)
+- `src/continuous.rs`: Silence-based batching + streaming-session driver
+- `src/signals.rs`: Lifecycle signals only (SIGTERM, SIGINT)
+- `src/ipc.rs`: Unix-socket daemon protocol for `wayctl`
 - `src/beep.rs`: Musical audio feedback system with CPAL
 - `src/audio.rs`: Audio recording via PipeWire/CPAL
 - `src/config.rs`: Environment variable configuration
-- `src/whisper.rs`: OpenAI Whisper API client
+- `src/transcription/parakeet.rs`: Parakeet CTC / TDT batch provider
+- `src/transcription/parakeet_streaming.rs`: Parakeet EOU streaming provider
 - `.env.example`: Configuration template

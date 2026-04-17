@@ -12,6 +12,9 @@ pub mod local;
 // Parakeet provider using NVIDIA Parakeet models via ONNX Runtime
 #[cfg(feature = "parakeet")]
 pub mod parakeet;
+// Parakeet streaming provider (EOU model) — emits finalized utterances as audio flows in
+#[cfg(feature = "parakeet")]
+pub mod parakeet_streaming;
 
 #[derive(Debug)]
 pub struct ApiErrorDetails {
@@ -104,6 +107,46 @@ pub trait TranscriptionProvider: Send + Sync {
     ) -> Result<String, TranscriptionError>;
 }
 
+/// A provider that supports cache-aware streaming transcription.
+///
+/// Unlike `TranscriptionProvider`, streaming providers own a stateful session that
+/// accepts raw PCM samples incrementally and emits finalized utterances at natural
+/// boundaries. Used by continuous mode to avoid the
+/// extract-chunk-then-retranscribe overhead of the batch path.
+#[async_trait]
+pub trait StreamingTranscriptionProvider: Send + Sync {
+    /// Begin a fresh streaming session.
+    ///
+    /// `sample_rate` is declared by the caller; implementations that require a
+    /// specific rate (e.g. Parakeet EOU at 16 kHz) should return an error if
+    /// the caller's rate is incompatible.
+    async fn start_session(
+        &self,
+        sample_rate: u32,
+    ) -> Result<Box<dyn StreamingSession>, TranscriptionError>;
+}
+
+/// A single in-progress streaming transcription session.
+///
+/// The session accumulates text internally and only returns completed utterances.
+/// Partial hypotheses are deliberately not surfaced — downstream consumers
+/// (e.g. LLM-correction pipelines) want coherent finals, not mid-word noise.
+#[async_trait]
+pub trait StreamingSession: Send {
+    /// Feed PCM f32 samples (any length, mono, at the session's sample rate).
+    ///
+    /// If this chunk advances past a natural utterance boundary (e.g. the
+    /// underlying model detects end-of-utterance), the completed text is
+    /// returned. Otherwise returns an empty string.
+    async fn push_samples(&mut self, samples: &[f32])
+        -> Result<String, TranscriptionError>;
+
+    /// Force-finalize the current utterance, flushing any buffered audio
+    /// through the model. Returns the accumulated text (possibly empty).
+    /// The session is ready to start a new utterance immediately.
+    async fn finalize_utterance(&mut self) -> Result<String, TranscriptionError>;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderKind {
     OpenAI,
@@ -175,6 +218,42 @@ impl TranscriptionFactory {
                 let provider = parakeet::ParakeetProvider::new(&model_path, model_type)?;
                 Ok(Box::new(provider))
             }
+        }
+    }
+
+    /// Create a streaming provider if the configuration supports one.
+    ///
+    /// Returns `Ok(None)` for batch-only providers (OpenAI, Google, local whisper,
+    /// Parakeet CTC/TDT). Only `ProviderKind::Parakeet` with `PARAKEET_MODEL_TYPE=eou`
+    /// currently yields a streaming provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the streaming provider exists for this kind but fails
+    /// to initialize (e.g. model files missing).
+    #[allow(clippy::unused_async)] // future providers may be async; keep signature uniform
+    #[cfg_attr(not(feature = "parakeet"), allow(unused_variables))]
+    pub async fn create_streaming_provider(
+        kind: ProviderKind,
+        cfg: &crate::config::Config,
+    ) -> Result<Option<Box<dyn StreamingTranscriptionProvider>>, TranscriptionError> {
+        match kind {
+            #[cfg(feature = "parakeet")]
+            ProviderKind::Parakeet => {
+                if parakeet::ParakeetModelType::parse(&cfg.parakeet_model_type)
+                    != parakeet::ParakeetModelType::EOU
+                {
+                    return Ok(None);
+                }
+                let model_path = if let Some(ref custom_path) = cfg.parakeet_model_path {
+                    std::path::PathBuf::from(custom_path)
+                } else {
+                    crate::config::Config::parakeet_model_path(&cfg.parakeet_model_type)
+                };
+                let provider = parakeet_streaming::ParakeetStreamingProvider::new(&model_path)?;
+                Ok(Some(Box::new(provider)))
+            }
+            _ => Ok(None),
         }
     }
 }

@@ -5,10 +5,13 @@ use std::path::{Path, PathBuf};
 /// Model type for Parakeet transcription
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParakeetModelType {
-    /// CTC model - English only, faster
+    /// CTC model - English only, faster (batch / one-shot only)
     CTC,
-    /// TDT model - Multilingual (25 languages), auto-detection
+    /// TDT model - Multilingual (25 languages), auto-detection (batch / one-shot only)
     TDT,
+    /// EOU model - English only, streaming with end-of-utterance detection
+    /// (used only by the streaming path — see `parakeet_streaming.rs`).
+    EOU,
 }
 
 impl ParakeetModelType {
@@ -16,6 +19,7 @@ impl ParakeetModelType {
     pub fn parse(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "tdt" => Self::TDT,
+            "eou" => Self::EOU,
             _ => Self::CTC,
         }
     }
@@ -58,6 +62,14 @@ impl TranscriptionProvider for ParakeetProvider {
         audio_data: Vec<u8>,
         _language: Option<String>,
     ) -> Result<String, TranscriptionError> {
+        if self.model_type == ParakeetModelType::EOU {
+            return Err(TranscriptionError::ConfigurationError(
+                "EOU model requires continuous or daemon-streaming mode; \
+                 use PARAKEET_MODEL_TYPE=ctc or tdt for one-shot transcription"
+                    .to_string(),
+            ));
+        }
+
         if let Ok(dump_path) = std::env::var("WAYSTT_DUMP_WAV") {
             match std::fs::write(&dump_path, &audio_data) {
                 Ok(()) => eprintln!("🎧 Wrote captured WAV to {dump_path} ({} bytes)", audio_data.len()),
@@ -181,6 +193,13 @@ fn transcribe_blocking(
 
             Ok(result.text)
         }
+        ParakeetModelType::EOU => {
+            // Unreachable: the `TranscriptionProvider` impl guards against EOU before
+            // reaching this function. Kept for match exhaustiveness.
+            Err(TranscriptionError::ConfigurationError(
+                "EOU model does not support batch transcription".to_string(),
+            ))
+        }
     }
 }
 
@@ -194,9 +213,26 @@ mod tests {
         assert_eq!(ParakeetModelType::parse("CTC"), ParakeetModelType::CTC);
         assert_eq!(ParakeetModelType::parse("tdt"), ParakeetModelType::TDT);
         assert_eq!(ParakeetModelType::parse("TDT"), ParakeetModelType::TDT);
+        assert_eq!(ParakeetModelType::parse("eou"), ParakeetModelType::EOU);
+        assert_eq!(ParakeetModelType::parse("EOU"), ParakeetModelType::EOU);
         // Default to CTC for unknown
         assert_eq!(ParakeetModelType::parse("unknown"), ParakeetModelType::CTC);
         assert_eq!(ParakeetModelType::parse(""), ParakeetModelType::CTC);
+    }
+
+    #[tokio::test]
+    async fn test_eou_model_rejects_batch_transcription() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Directory exists so the provider itself initializes.
+        let provider =
+            ParakeetProvider::new(tmp.path(), ParakeetModelType::EOU).expect("provider");
+        let result = provider.transcribe_with_language(vec![], None).await;
+        match result {
+            Err(TranscriptionError::ConfigurationError(msg)) => {
+                assert!(msg.contains("EOU model requires continuous or daemon-streaming mode"));
+            }
+            other => panic!("expected ConfigurationError, got {other:?}"),
+        }
     }
 
     #[test]

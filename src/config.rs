@@ -334,6 +334,27 @@ pub fn bootstrap(envfile: Option<&Path>) -> anyhow::Result<Config> {
             return Err(e);
         }
     }
+
+    // Parakeet EOU is English-only. Warn (don't fail) when users pick a
+    // non-English WHISPER_LANGUAGE with it — the model may still run but the
+    // language tag is meaningless for EOU's English-only vocabulary.
+    if cfg.transcription_provider == "parakeet"
+        && cfg.parakeet_model_type.eq_ignore_ascii_case("eou")
+    {
+        let lang = cfg.whisper_language.trim();
+        let english_ok = lang.is_empty()
+            || lang.eq_ignore_ascii_case("auto")
+            || lang.eq_ignore_ascii_case("en")
+            || lang.to_ascii_lowercase().starts_with("en-")
+            || lang.to_ascii_lowercase().starts_with("en_");
+        if !english_ok {
+            eprintln!(
+                "Warning: PARAKEET_MODEL_TYPE=eou is English-only; \
+                 WHISPER_LANGUAGE={lang} will be ignored."
+            );
+        }
+    }
+
     Ok(cfg)
 }
 

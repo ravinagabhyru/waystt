@@ -19,7 +19,9 @@ use tokio::sync::{mpsc, Mutex, Notify};
 use crate::audio::AudioRecorder;
 use crate::audio_processing::AudioProcessor;
 use crate::pipeline::AudioPipeline;
-use crate::transcription::TranscriptionProvider;
+use crate::transcription::{
+    StreamingSession, StreamingTranscriptionProvider, TranscriptionProvider,
+};
 
 /// Configuration for continuous speech recognition mode
 #[derive(Debug, Clone)]
@@ -126,24 +128,30 @@ pub struct ContinuousModeController {
     config: ContinuousConfig,
     /// Next sequence number for chunks
     next_seq: u64,
-    /// Channel for sending chunks to workers
+    /// Channel for sending chunks to workers (batch path only)
     chunk_tx: Option<mpsc::Sender<AudioChunk>>,
-    /// Results buffer keyed by sequence number
+    /// Results buffer keyed by sequence number (batch path only)
     results: Arc<Mutex<BTreeMap<u64, TranscriptionResult>>>,
-    /// Next sequence number to output (for ordered output)
+    /// Next sequence number to output (for ordered output) (batch path only)
     next_output_seq: Arc<Mutex<u64>>,
-    /// Notification when new results are ready
+    /// Notification when new results are ready (batch path only)
     result_notify: Arc<Notify>,
     /// Statistics
     stats: ContinuousStats,
-    /// Worker task handles for cleanup
+    /// Worker task handles for cleanup (batch path only)
     worker_handles: Vec<tokio::task::JoinHandle<()>>,
-    /// Output ordering task handle
+    /// Output ordering task handle (batch path only)
     output_handle: Option<tokio::task::JoinHandle<()>>,
     /// Output channel sender (kept to prevent channel closing)
-    _output_tx: Option<mpsc::Sender<String>>,
+    output_tx: Option<mpsc::Sender<String>>,
     /// Silence detection state
     silence_state: SilenceDetectionState,
+    /// Active streaming session if a streaming provider was supplied.
+    /// When `Some`, `process_audio` takes the streaming path and the
+    /// worker pool / ordered-output plumbing above is left idle.
+    streaming_session: Option<Box<dyn StreamingSession>>,
+    /// Counter for rate-limited diagnostic logging on the streaming path.
+    diag_tick_count: u64,
 }
 
 impl ContinuousModeController {
@@ -162,17 +170,26 @@ impl ContinuousModeController {
             stats: ContinuousStats::default(),
             worker_handles: Vec::new(),
             output_handle: None,
-            _output_tx: None,
+            output_tx: None,
             silence_state,
+            streaming_session: None,
+            diag_tick_count: 0,
         }
     }
 
-    /// Start continuous mode with the given provider and pipeline
-    /// Returns a receiver for transcription results (in order)
+    /// Start continuous mode with the given provider and pipeline.
+    ///
+    /// If `streaming` is supplied, a single cache-aware streaming session is
+    /// used (EOU model) and the worker pool is not spawned. Otherwise the
+    /// batch path extracts chunks on silence and runs a small parallel
+    /// transcription pool (OpenAI, Google, Whisper, Parakeet CTC/TDT).
+    ///
+    /// Returns a receiver for transcription results (in capture order).
     pub async fn start(
         &mut self,
         pipeline: Arc<AudioPipeline>,
         provider: Arc<dyn TranscriptionProvider>,
+        streaming: Option<Arc<dyn StreamingTranscriptionProvider>>,
         language: Option<String>,
     ) -> Result<mpsc::Receiver<String>> {
         // Check if already running
@@ -187,42 +204,60 @@ impl ContinuousModeController {
         self.stats = ContinuousStats::default();
         self.silence_state.reset();
 
-        // Create chunk queue channel
-        let (chunk_tx, chunk_rx) = mpsc::channel::<AudioChunk>(self.config.max_queue_size);
-        self.chunk_tx = Some(chunk_tx);
-
         // Create output channel
         let (output_tx, output_rx) = mpsc::channel::<String>(100);
-        self._output_tx = Some(output_tx.clone());
+        self.output_tx = Some(output_tx.clone());
 
-        // Spawn worker pool
-        let chunk_rx = Arc::new(Mutex::new(chunk_rx));
-        for worker_id in 0..self.config.worker_count {
-            let rx = Arc::clone(&chunk_rx);
-            let results = Arc::clone(&self.results);
-            let notify = Arc::clone(&self.result_notify);
-            let pipeline = Arc::clone(&pipeline);
-            let provider = Arc::clone(&provider);
-            let lang = language.clone();
+        if let Some(streaming) = streaming {
+            // Streaming path: single stateful session. No worker pool, no
+            // BTreeMap reordering, no output-ordering task — utterances are
+            // naturally in order and emitted straight to `output_tx`.
+            let session = streaming
+                .start_session(self.config.sample_rate)
+                .await
+                .map_err(|e| anyhow!("Failed to start streaming session: {e}"))?;
+            self.streaming_session = Some(session);
+            let _ = pipeline; // unused on streaming path — avoid dead-code warnings
+            let _ = provider;
+            let _ = language;
+        } else {
+            // Batch path: silence-based chunk extraction + worker pool.
 
-            let handle = tokio::spawn(async move {
-                transcription_worker(worker_id, rx, results, notify, pipeline, provider, lang)
+            // Create chunk queue channel
+            let (chunk_tx, chunk_rx) = mpsc::channel::<AudioChunk>(self.config.max_queue_size);
+            self.chunk_tx = Some(chunk_tx);
+
+            // Spawn worker pool
+            let chunk_rx = Arc::new(Mutex::new(chunk_rx));
+            for worker_id in 0..self.config.worker_count {
+                let rx = Arc::clone(&chunk_rx);
+                let results = Arc::clone(&self.results);
+                let notify = Arc::clone(&self.result_notify);
+                let pipeline = Arc::clone(&pipeline);
+                let provider = Arc::clone(&provider);
+                let lang = language.clone();
+
+                let handle = tokio::spawn(async move {
+                    transcription_worker(
+                        worker_id, rx, results, notify, pipeline, provider, lang,
+                    )
                     .await;
-            });
-            self.worker_handles.push(handle);
-        }
+                });
+                self.worker_handles.push(handle);
+            }
 
-        // Spawn output ordering task
-        {
-            let results = Arc::clone(&self.results);
-            let next_output_seq = Arc::clone(&self.next_output_seq);
-            let notify = Arc::clone(&self.result_notify);
-            let tx = output_tx;
+            // Spawn output ordering task
+            {
+                let results = Arc::clone(&self.results);
+                let next_output_seq = Arc::clone(&self.next_output_seq);
+                let notify = Arc::clone(&self.result_notify);
+                let tx = output_tx;
 
-            let handle = tokio::spawn(async move {
-                output_ordered_results(results, next_output_seq, notify, tx).await;
-            });
-            self.output_handle = Some(handle);
+                let handle = tokio::spawn(async move {
+                    output_ordered_results(results, next_output_seq, notify, tx).await;
+                });
+                self.output_handle = Some(handle);
+            }
         }
 
         // Set state to running
@@ -231,14 +266,167 @@ impl ContinuousModeController {
         Ok(output_rx)
     }
 
-    /// Process one iteration of silence detection.
-    /// Call this repeatedly in a loop while in continuous mode.
-    /// Returns true if a chunk was extracted and queued.
+    /// Process one iteration of audio.
+    ///
+    /// Called repeatedly (every ~50 ms) from the daemon / continuous loop.
+    /// - **Streaming path**: drains any newly available samples and feeds them
+    ///   to the session. When the session emits a completed utterance (either
+    ///   via model-detected EOU or silence-forced finalize), it is sent to the
+    ///   output channel. Returns `true` if an utterance was emitted.
+    /// - **Batch path**: existing silence-based chunking into a worker pool.
+    ///
+    /// Returns true if an utterance was emitted (streaming) or a chunk was
+    /// extracted and queued (batch).
     pub async fn process_audio(&mut self, recorder: &AudioRecorder) -> Result<bool> {
         if self.state != ContinuousState::Running {
             return Ok(false);
         }
 
+        if self.streaming_session.is_some() {
+            self.process_audio_streaming(recorder).await
+        } else {
+            self.process_audio_batch(recorder).await
+        }
+    }
+
+    async fn process_audio_streaming(&mut self, recorder: &AudioRecorder) -> Result<bool> {
+        // Drain everything available this tick.
+        let buffer_len = recorder.buffer_len().unwrap_or(0);
+        if buffer_len == 0 {
+            return Ok(false);
+        }
+        let samples = recorder.drain_samples(buffer_len).unwrap_or_default();
+        if samples.is_empty() {
+            return Ok(false);
+        }
+
+        // Voice activity detection on the tail window of what we just drained.
+        // This is the same signal the batch path uses via `peek_tail`; here we
+        // already own the samples so we compute RMS on the tail slice directly.
+        let window_samples = self.silence_state.window_samples;
+        let window = if samples.len() >= window_samples {
+            &samples[samples.len() - window_samples..]
+        } else {
+            samples.as_slice()
+        };
+        let rms = self.silence_state.processor.calculate_rms(window);
+        self.silence_state.peak_rms = self.silence_state.peak_rms.max(rms);
+        let threshold = (self.silence_state.peak_rms * 0.1).max(0.005);
+        let now = Instant::now();
+        let was_voiced = self.silence_state.first_voice_time.is_some();
+        if rms > threshold {
+            if self.silence_state.first_voice_time.is_none() {
+                self.silence_state.first_voice_time = Some(now);
+                eprintln!(
+                    "[Stream][DIAG] first voice detected: rms={rms:.5} peak_rms={:.5} threshold={threshold:.5} window={}",
+                    self.silence_state.peak_rms,
+                    window.len()
+                );
+            }
+            self.silence_state.last_voice_time = Some(now);
+        }
+
+        // Rate-limited RMS log (every ~1s at 50ms ticks) so we can see what VAD is seeing.
+        self.diag_tick_count += 1;
+        if self.diag_tick_count.is_multiple_of(20) {
+            eprintln!(
+                "[Stream][DIAG] tick={} drained={} rms={rms:.5} peak_rms={:.5} threshold={threshold:.5} voiced={was_voiced}",
+                self.diag_tick_count,
+                samples.len(),
+                self.silence_state.peak_rms,
+            );
+        }
+
+        // Stats: every sample that flows through the session counts.
+        self.stats.total_audio_seconds +=
+            samples.len() as f32 / self.config.sample_rate as f32;
+
+        // Feed the drained samples to the session. A non-empty return means
+        // the model itself emitted an end-of-utterance marker and the text
+        // is the finalized utterance.
+        let session = self
+            .streaming_session
+            .as_mut()
+            .expect("streaming_session must be Some on streaming path");
+        let completed = session
+            .push_samples(&samples)
+            .await
+            .map_err(|e| anyhow!("Streaming transcription failed: {e}"))?;
+
+        if !completed.is_empty() {
+            eprintln!(
+                "[Stream][DIAG] EOU-marker emission: \"{}\" ({} chars)",
+                completed,
+                completed.len()
+            );
+            self.emit_streaming(&completed).await;
+            self.stats.chunks_captured += 1;
+            self.stats.chunks_transcribed += 1;
+            self.silence_state.reset();
+            return Ok(true);
+        }
+
+        // Silence / max-duration fallback: force finalize even when the model
+        // hasn't emitted its own EOU marker. Handles utterances with unnatural
+        // endings and hard-caps runaway inference.
+        let should_force_finalize = if let (Some(first), Some(last)) = (
+            self.silence_state.first_voice_time,
+            self.silence_state.last_voice_time,
+        ) {
+            let since_first = now.duration_since(first).as_millis() as u64;
+            let since_last = now.duration_since(last).as_millis() as u64;
+            let silence_triggered = since_first >= self.config.min_speech_ms
+                && since_last >= self.config.silence_threshold_ms;
+            let max_duration_reached = since_first >= self.config.max_chunk_ms;
+            silence_triggered || max_duration_reached
+        } else {
+            false
+        };
+
+        if should_force_finalize {
+            let (since_first_ms, since_last_ms) = if let (Some(first), Some(last)) = (
+                self.silence_state.first_voice_time,
+                self.silence_state.last_voice_time,
+            ) {
+                (
+                    now.duration_since(first).as_millis() as u64,
+                    now.duration_since(last).as_millis() as u64,
+                )
+            } else {
+                (0, 0)
+            };
+            eprintln!(
+                "[Stream][DIAG] force-finalize: since_first={since_first_ms}ms since_last={since_last_ms}ms"
+            );
+            let session = self.streaming_session.as_mut().unwrap();
+            let text = session
+                .finalize_utterance()
+                .await
+                .map_err(|e| anyhow!("Streaming finalize failed: {e}"))?;
+            eprintln!(
+                "[Stream][DIAG] finalize result: \"{}\" ({} chars)",
+                text,
+                text.len()
+            );
+            if !text.is_empty() {
+                self.emit_streaming(&text).await;
+                self.stats.chunks_captured += 1;
+                self.stats.chunks_transcribed += 1;
+            }
+            self.silence_state.reset();
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
+    async fn emit_streaming(&self, text: &str) {
+        if let Some(ref tx) = self.output_tx {
+            let _ = tx.send(text.to_string()).await;
+        }
+    }
+
+    async fn process_audio_batch(&mut self, recorder: &AudioRecorder) -> Result<bool> {
         // Get current buffer state
         let buffer_len = recorder.buffer_len().unwrap_or(0);
 
@@ -337,7 +525,54 @@ impl ContinuousModeController {
 
         self.state = ContinuousState::Stopping;
 
-        // Extract any remaining audio as final chunk
+        if self.streaming_session.is_some() {
+            // Streaming path: drain any last samples, finalize the session,
+            // emit whatever text it produces, then drop the session.
+            let buffer_len = recorder.buffer_len().unwrap_or(0);
+            if buffer_len > 0 {
+                let samples = recorder.drain_samples(buffer_len).unwrap_or_default();
+                if !samples.is_empty() {
+                    self.stats.total_audio_seconds +=
+                        samples.len() as f32 / self.config.sample_rate as f32;
+                    if let Some(ref mut session) = self.streaming_session {
+                        // Best-effort: a failure here doesn't stop shutdown.
+                        match session.push_samples(&samples).await {
+                            Ok(completed) if !completed.is_empty() => {
+                                self.emit_streaming(&completed).await;
+                                self.stats.chunks_captured += 1;
+                                self.stats.chunks_transcribed += 1;
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                eprintln!("[Continuous] Final push_samples failed: {e}");
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(mut session) = self.streaming_session.take() {
+                match session.finalize_utterance().await {
+                    Ok(text) if !text.is_empty() => {
+                        self.emit_streaming(&text).await;
+                        self.stats.chunks_captured += 1;
+                        self.stats.chunks_transcribed += 1;
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        eprintln!("[Continuous] Final finalize_utterance failed: {e}");
+                        self.stats.chunks_failed += 1;
+                    }
+                }
+                drop(session);
+            }
+
+            // Close output channel so the receiver sees EOF.
+            self.output_tx.take();
+            self.state = ContinuousState::Stopped;
+            return Ok(self.stats.clone());
+        }
+
+        // Batch path: drain remainder, close worker queue, join, flush.
         let buffer_len = recorder.buffer_len().unwrap_or(0);
         if buffer_len > 0 {
             let samples = recorder.drain_samples(buffer_len).unwrap_or_default();
@@ -388,7 +623,7 @@ impl ContinuousModeController {
         }
 
         // Close output channel
-        self._output_tx.take();
+        self.output_tx.take();
 
         // Set state to stopped
         self.state = ContinuousState::Stopped;

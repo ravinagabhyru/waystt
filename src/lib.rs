@@ -54,20 +54,24 @@ pub async fn run(options: cli::RunOptions) -> Result<i32> {
     let kind = config.provider_kind();
     let provider =
         crate::transcription::TranscriptionFactory::create_provider(kind, &config).await?;
+    let streaming_provider =
+        crate::transcription::TranscriptionFactory::create_streaming_provider(kind, &config)
+            .await?
+            .map(std::sync::Arc::from);
 
     // Create app
-    let app = crate::app::App::init(options.clone(), config, provider).await?;
+    let app =
+        crate::app::App::init(options.clone(), config, provider, streaming_provider).await?;
 
-    // If running as a daemon, serve IPC instead of signal flow
-    if options.daemon {
-        let socket_path = crate::ipc::default_socket_path();
-        eprintln!("Starting IPC server at {}", socket_path.display());
-        crate::ipc::serve(app, socket_path).await?;
-        return Ok(0);
+    match options.mode {
+        crate::cli::RunMode::Daemon => {
+            let socket_path = crate::ipc::default_socket_path();
+            eprintln!("Starting IPC server at {}", socket_path.display());
+            crate::ipc::serve(app, socket_path).await?;
+            Ok(0)
+        }
+        crate::cli::RunMode::Continuous => app.run_continuous().await,
     }
-
-    // One-shot mode via signal flow
-    app.run().await
 }
 
 /// Download a model with progress tracking.
