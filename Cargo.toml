@@ -61,7 +61,7 @@ name = "wayctl"
 path = "src/bin/wayctl.rs"
 
 [features]
-default = []
+default = ["parakeet"]
 parakeet = ["parakeet-rs"]
 parakeet-cuda = ["parakeet", "parakeet-rs/cuda"]
 
