@@ -150,8 +150,6 @@ pub struct ContinuousModeController {
     /// When `Some`, `process_audio` takes the streaming path and the
     /// worker pool / ordered-output plumbing above is left idle.
     streaming_session: Option<Box<dyn StreamingSession>>,
-    /// Counter for rate-limited diagnostic logging on the streaming path.
-    diag_tick_count: u64,
 }
 
 impl ContinuousModeController {
@@ -173,7 +171,6 @@ impl ContinuousModeController {
             output_tx: None,
             silence_state,
             streaming_session: None,
-            diag_tick_count: 0,
         }
     }
 
@@ -313,28 +310,11 @@ impl ContinuousModeController {
         self.silence_state.peak_rms = self.silence_state.peak_rms.max(rms);
         let threshold = (self.silence_state.peak_rms * 0.1).max(0.005);
         let now = Instant::now();
-        let was_voiced = self.silence_state.first_voice_time.is_some();
         if rms > threshold {
             if self.silence_state.first_voice_time.is_none() {
                 self.silence_state.first_voice_time = Some(now);
-                eprintln!(
-                    "[Stream][DIAG] first voice detected: rms={rms:.5} peak_rms={:.5} threshold={threshold:.5} window={}",
-                    self.silence_state.peak_rms,
-                    window.len()
-                );
             }
             self.silence_state.last_voice_time = Some(now);
-        }
-
-        // Rate-limited RMS log (every ~1s at 50ms ticks) so we can see what VAD is seeing.
-        self.diag_tick_count += 1;
-        if self.diag_tick_count.is_multiple_of(20) {
-            eprintln!(
-                "[Stream][DIAG] tick={} drained={} rms={rms:.5} peak_rms={:.5} threshold={threshold:.5} voiced={was_voiced}",
-                self.diag_tick_count,
-                samples.len(),
-                self.silence_state.peak_rms,
-            );
         }
 
         // Stats: every sample that flows through the session counts.
@@ -354,11 +334,6 @@ impl ContinuousModeController {
             .map_err(|e| anyhow!("Streaming transcription failed: {e}"))?;
 
         if !completed.is_empty() {
-            eprintln!(
-                "[Stream][DIAG] EOU-marker emission: \"{}\" ({} chars)",
-                completed,
-                completed.len()
-            );
             self.emit_streaming(&completed).await;
             self.stats.chunks_captured += 1;
             self.stats.chunks_transcribed += 1;
@@ -384,30 +359,11 @@ impl ContinuousModeController {
         };
 
         if should_force_finalize {
-            let (since_first_ms, since_last_ms) = if let (Some(first), Some(last)) = (
-                self.silence_state.first_voice_time,
-                self.silence_state.last_voice_time,
-            ) {
-                (
-                    now.duration_since(first).as_millis() as u64,
-                    now.duration_since(last).as_millis() as u64,
-                )
-            } else {
-                (0, 0)
-            };
-            eprintln!(
-                "[Stream][DIAG] force-finalize: since_first={since_first_ms}ms since_last={since_last_ms}ms"
-            );
             let session = self.streaming_session.as_mut().unwrap();
             let text = session
                 .finalize_utterance()
                 .await
                 .map_err(|e| anyhow!("Streaming finalize failed: {e}"))?;
-            eprintln!(
-                "[Stream][DIAG] finalize result: \"{}\" ({} chars)",
-                text,
-                text.len()
-            );
             if !text.is_empty() {
                 self.emit_streaming(&text).await;
                 self.stats.chunks_captured += 1;

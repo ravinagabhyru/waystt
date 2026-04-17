@@ -62,6 +62,16 @@ pub trait EouInference: Send {
     /// detected, the returned string ends with [`EOU_MARKER`].
     fn transcribe_chunk(&mut self, chunk: &[f32]) -> Result<String, TranscriptionError>;
 
+    /// Run one inference with the model's internal `reset_on_eou=true` path.
+    /// If the decoder predicts the EOU token for this chunk, the vendor code
+    /// calls `reset_states()` internally — a *soft* reset that clears
+    /// `state_h`, `state_c`, and `last_token` while deliberately preserving
+    /// `encoder_cache` and `audio_buffer` (see `parakeet_eou.rs:192-200`).
+    /// Used at finalize time to break cross-utterance decoder-state leakage
+    /// without paying a full model reload and its MIN_BUFFER_SAMPLES warm-up.
+    fn transcribe_chunk_reset(&mut self, chunk: &[f32])
+        -> Result<String, TranscriptionError>;
+
     /// Discard internal decoder/encoder state and start fresh. Used between
     /// utterances so audio from the previous utterance cannot bleed into the
     /// next one via the 4 s encoder ring buffer.
@@ -109,6 +119,21 @@ impl EouInference for RealEou {
                 status_code: None,
                 error_code: Some("TRANSCRIPTION_ERROR".to_string()),
                 error_message: format!("EOU transcription failed: {e}"),
+                raw_response: None,
+            })
+        })
+    }
+
+    fn transcribe_chunk_reset(
+        &mut self,
+        chunk: &[f32],
+    ) -> Result<String, TranscriptionError> {
+        self.model.transcribe(chunk, true).map_err(|e| {
+            TranscriptionError::ApiError(ApiErrorDetails {
+                provider: "Parakeet (EOU)".to_string(),
+                status_code: None,
+                error_code: Some("TRANSCRIPTION_ERROR".to_string()),
+                error_message: format!("EOU transcription (reset path) failed: {e}"),
                 raw_response: None,
             })
         })
@@ -241,9 +266,6 @@ pub struct ParakeetEouSession {
     /// which is critical for ParakeetEOU (mel features from a raw ~0.04-peak
     /// mic signal produce essentially no decoder output).
     running_peak: f32,
-    /// Diagnostic counters for temporary logging.
-    diag_chunks_sent: u64,
-    diag_nonempty_deltas: u64,
 }
 
 /// Target peak amplitude after normalization (matches `normalize_audio` in the
@@ -300,8 +322,6 @@ impl ParakeetEouSession {
             carry_over: Vec::with_capacity(EOU_CHUNK_SAMPLES),
             accumulator: String::new(),
             running_peak: 0.0,
-            diag_chunks_sent: 0,
-            diag_nonempty_deltas: 0,
         })
     }
 
@@ -374,63 +394,36 @@ impl StreamingSession for ParakeetEouSession {
 
         while self.carry_over.len() >= EOU_CHUNK_SAMPLES {
             let mut chunk: Vec<f32> = self.carry_over.drain(..EOU_CHUNK_SAMPLES).collect();
-            // DIAG: chunk-level stats before dispatch — min/max/mean_abs give
-            // a quick read on whether audio has real amplitude at this point.
-            let (mut cmin, mut cmax, mut sum_abs) = (f32::INFINITY, f32::NEG_INFINITY, 0.0f32);
-            for &v in &chunk {
-                if v < cmin {
-                    cmin = v;
-                }
-                if v > cmax {
-                    cmax = v;
-                }
-                sum_abs += v.abs();
-            }
-            let mean_abs = sum_abs / chunk.len() as f32;
             // Running-peak normalization. Peak ratchets up; once we've seen a
             // loud chunk, every subsequent chunk uses that peak as the gain
             // reference. Below `NORMALIZE_MIN_PEAK` we skip gain so pure
-            // silence at startup isn't amplified to noise.
-            let chunk_peak = cmax.max(-cmin);
+            // silence at startup isn't amplified to noise. Mirrors the batch
+            // path's `normalize_audio` — without it, a raw ~0.04-peak mic
+            // signal produces essentially no decoder output.
+            let mut chunk_peak = 0.0f32;
+            for &v in &chunk {
+                let a = v.abs();
+                if a > chunk_peak {
+                    chunk_peak = a;
+                }
+            }
             if chunk_peak > self.running_peak {
                 self.running_peak = chunk_peak;
             }
-            let gain = if self.running_peak > NORMALIZE_MIN_PEAK {
-                NORMALIZE_TARGET_PEAK / self.running_peak
-            } else {
-                1.0
-            };
-            if (gain - 1.0).abs() > f32::EPSILON {
-                for s in &mut chunk {
-                    *s *= gain;
+            if self.running_peak > NORMALIZE_MIN_PEAK {
+                let gain = NORMALIZE_TARGET_PEAK / self.running_peak;
+                if (gain - 1.0).abs() > f32::EPSILON {
+                    for s in &mut chunk {
+                        *s *= gain;
+                    }
                 }
             }
             let outcome = self.send_chunk(chunk).await?;
-            self.diag_chunks_sent += 1;
             let delta = outcome.result?;
             if !delta.is_empty() {
-                self.diag_nonempty_deltas += 1;
-                eprintln!(
-                    "[EOU][DIAG] chunk#{} delta=\"{}\" ({} chars) min={cmin:.4} max={cmax:.4} mean_abs={mean_abs:.5} gain={gain:.2} running_peak={:.4}",
-                    self.diag_chunks_sent,
-                    delta,
-                    delta.len(),
-                    self.running_peak,
-                );
                 self.accumulator.push_str(&delta);
-            } else if self.diag_chunks_sent.is_multiple_of(10) {
-                // Periodic heartbeat for empty-delta chunks so we can see the
-                // model is being called but not producing tokens.
-                eprintln!(
-                    "[EOU][DIAG] chunk#{} empty-delta (total_nonempty={}) min={cmin:.4} max={cmax:.4} mean_abs={mean_abs:.5} gain={gain:.2} running_peak={:.4}",
-                    self.diag_chunks_sent, self.diag_nonempty_deltas, self.running_peak,
-                );
             }
             if outcome.utterance_done {
-                eprintln!(
-                    "[EOU][DIAG] utterance_done at chunk#{} accumulator=\"{}\"",
-                    self.diag_chunks_sent, self.accumulator,
-                );
                 let mut utter = std::mem::take(&mut self.accumulator);
                 trim_trailing_whitespace(&mut utter);
                 if !utter.is_empty() {
@@ -460,13 +453,6 @@ impl StreamingSession for ParakeetEouSession {
         }
 
         let flushed = self.send_finalize().await?;
-        eprintln!(
-            "[EOU][DIAG] finalize flushed=\"{}\" accumulator_before=\"{}\" chunks_sent={} nonempty={}",
-            flushed,
-            self.accumulator,
-            self.diag_chunks_sent,
-            self.diag_nonempty_deltas,
-        );
         if !flushed.is_empty() {
             self.accumulator.push_str(&flushed);
         }
@@ -521,18 +507,29 @@ fn process_chunk(eou: &mut dyn EouInference, samples: &[f32]) -> ChunkOutcome {
 
 fn finalize(eou: &mut dyn EouInference) -> Result<String, TranscriptionError> {
     // Feed `FLUSH_SILENCE_CHUNKS` of silence so any token still buffered in the
-    // encoder gets flushed out. We deliberately do NOT call `eou.reset()` —
-    // rebuilding `ParakeetEOU` from disk costs hundreds of ms and its new
-    // `audio_buffer` would then suppress transcription for the first 1 s of
-    // the next utterance (see `parakeet_eou.rs` MIN_BUFFER_SAMPLES guard).
-    // Since our silence threshold already enforces ≥700 ms between utterances,
-    // the encoder cache is effectively clean by the time the user speaks
-    // again; keeping the session warm across utterances eliminates dropped
-    // leading words with no measurable downside.
+    // encoder gets flushed out. We deliberately do NOT call `eou.reset()` (the
+    // hard reset) — rebuilding `ParakeetEOU` from disk costs hundreds of ms
+    // and its new `audio_buffer` would then suppress transcription for the
+    // first 1 s of the next utterance (see `parakeet_eou.rs` MIN_BUFFER_SAMPLES
+    // guard).
+    //
+    // The last flush chunk uses `transcribe_chunk_reset` (vendor's
+    // `reset_on_eou=true` path) so the decoder's RNN-T state (state_h, state_c,
+    // last_token) is cleared between utterances. Without this soft reset, a
+    // live decoder hypothesis can bleed into the next utterance: the symptoms
+    // are phantom tokens emitted during inter-utterance silence, lost head
+    // words at the next utterance, and hallucinated tail tokens during the
+    // silence flush itself.
     let silence = vec![0.0f32; EOU_CHUNK_SAMPLES];
     let mut tail = String::new();
-    for _ in 0..FLUSH_SILENCE_CHUNKS {
-        let mut delta = eou.transcribe_chunk(&silence)?;
+    const { assert!(FLUSH_SILENCE_CHUNKS >= 1) };
+    let last_index = FLUSH_SILENCE_CHUNKS - 1;
+    for i in 0..FLUSH_SILENCE_CHUNKS {
+        let mut delta = if i == last_index {
+            eou.transcribe_chunk_reset(&silence)?
+        } else {
+            eou.transcribe_chunk(&silence)?
+        };
         let _ = strip_eou_marker(&mut delta);
         if !delta.is_empty() {
             tail.push_str(&delta);
@@ -568,12 +565,14 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex as StdMutex};
 
-    /// A scripted stub: each call to `transcribe_chunk` returns the next entry
-    /// from `responses`. `reset_calls` tracks how many times `reset` was called.
+    /// A scripted stub: each call to `transcribe_chunk` (or
+    /// `transcribe_chunk_reset`) returns the next entry from `responses`.
+    /// Both counters track how many times each kind of reset was invoked.
     struct StubEou {
         responses: Vec<Result<String, TranscriptionError>>,
         received_chunks: Arc<StdMutex<Vec<Vec<f32>>>>,
-        reset_calls: Arc<StdMutex<u32>>,
+        soft_reset_calls: Arc<StdMutex<u32>>,
+        hard_reset_calls: Arc<StdMutex<u32>>,
     }
 
     impl EouInference for StubEou {
@@ -586,8 +585,21 @@ mod tests {
             }
         }
 
+        fn transcribe_chunk_reset(
+            &mut self,
+            chunk: &[f32],
+        ) -> Result<String, TranscriptionError> {
+            self.received_chunks.lock().unwrap().push(chunk.to_vec());
+            *self.soft_reset_calls.lock().unwrap() += 1;
+            if self.responses.is_empty() {
+                Ok(String::new())
+            } else {
+                self.responses.remove(0)
+            }
+        }
+
         fn reset(&mut self) -> Result<(), TranscriptionError> {
-            *self.reset_calls.lock().unwrap() += 1;
+            *self.hard_reset_calls.lock().unwrap() += 1;
             Ok(())
         }
     }
@@ -595,23 +607,39 @@ mod tests {
     type ReceivedChunks = Arc<StdMutex<Vec<Vec<f32>>>>;
     type ResetCounter = Arc<StdMutex<u32>>;
 
+    struct StubHandles {
+        received: ReceivedChunks,
+        soft_resets: ResetCounter,
+        hard_resets: ResetCounter,
+    }
+
     async fn stub_session(
         responses: Vec<Result<String, TranscriptionError>>,
-    ) -> (ParakeetEouSession, ReceivedChunks, ResetCounter) {
+    ) -> (ParakeetEouSession, StubHandles) {
         let received = Arc::new(StdMutex::new(Vec::new()));
-        let resets = Arc::new(StdMutex::new(0u32));
+        let soft_resets = Arc::new(StdMutex::new(0u32));
+        let hard_resets = Arc::new(StdMutex::new(0u32));
         let received_clone = Arc::clone(&received);
-        let resets_clone = Arc::clone(&resets);
+        let soft_clone = Arc::clone(&soft_resets);
+        let hard_clone = Arc::clone(&hard_resets);
         let session = ParakeetEouSession::spawn_with(move || {
             Ok(Box::new(StubEou {
                 responses,
                 received_chunks: received_clone,
-                reset_calls: resets_clone,
+                soft_reset_calls: soft_clone,
+                hard_reset_calls: hard_clone,
             }) as Box<dyn EouInference>)
         })
         .await
         .unwrap();
-        (session, received, resets)
+        (
+            session,
+            StubHandles {
+                received,
+                soft_resets,
+                hard_resets,
+            },
+        )
     }
 
     #[test]
@@ -630,30 +658,32 @@ mod tests {
 
     #[tokio::test]
     async fn test_push_samples_buffers_partial_chunk() {
-        let (mut session, received, resets) = stub_session(vec![]).await;
+        let (mut session, handles) = stub_session(vec![]).await;
         // Half a chunk — should buffer, never dispatch.
         let partial = vec![0.1f32; EOU_CHUNK_SAMPLES / 2];
         let text = session.push_samples(&partial).await.unwrap();
         assert_eq!(text, "");
-        assert!(received.lock().unwrap().is_empty());
-        assert_eq!(*resets.lock().unwrap(), 0);
+        assert!(handles.received.lock().unwrap().is_empty());
+        assert_eq!(*handles.soft_resets.lock().unwrap(), 0);
+        assert_eq!(*handles.hard_resets.lock().unwrap(), 0);
     }
 
     #[tokio::test]
     async fn test_push_samples_dispatches_one_chunk_when_full() {
-        let (mut session, received, resets) = stub_session(vec![Ok("hi".to_string())]).await;
+        let (mut session, handles) = stub_session(vec![Ok("hi".to_string())]).await;
         let full = vec![0.2f32; EOU_CHUNK_SAMPLES];
         let text = session.push_samples(&full).await.unwrap();
         // No EOU marker in the stub's response, so no completed utterance yet.
         assert_eq!(text, "");
-        assert_eq!(received.lock().unwrap().len(), 1);
-        assert_eq!(received.lock().unwrap()[0].len(), EOU_CHUNK_SAMPLES);
-        assert_eq!(*resets.lock().unwrap(), 0);
+        assert_eq!(handles.received.lock().unwrap().len(), 1);
+        assert_eq!(handles.received.lock().unwrap()[0].len(), EOU_CHUNK_SAMPLES);
+        assert_eq!(*handles.soft_resets.lock().unwrap(), 0);
+        assert_eq!(*handles.hard_resets.lock().unwrap(), 0);
     }
 
     #[tokio::test]
     async fn test_push_samples_dispatches_multiple_chunks() {
-        let (mut session, received, _resets) = stub_session(vec![
+        let (mut session, handles) = stub_session(vec![
             Ok("a".to_string()),
             Ok("b".to_string()),
         ])
@@ -663,13 +693,13 @@ mod tests {
         let samples = vec![0.3f32; n];
         let text = session.push_samples(&samples).await.unwrap();
         assert_eq!(text, "");
-        assert_eq!(received.lock().unwrap().len(), 2);
+        assert_eq!(handles.received.lock().unwrap().len(), 2);
         // Carry-over should hold the leftover half-chunk for next time.
     }
 
     #[tokio::test]
     async fn test_push_samples_emits_completed_utterance_on_eou() {
-        let (mut session, _received, resets) = stub_session(vec![
+        let (mut session, handles) = stub_session(vec![
             Ok("hello".to_string()),
             Ok(" world [EOU]".to_string()),
         ])
@@ -677,12 +707,14 @@ mod tests {
         let two_chunks = vec![0.4f32; EOU_CHUNK_SAMPLES * 2];
         let text = session.push_samples(&two_chunks).await.unwrap();
         assert_eq!(text, "hello world");
-        assert_eq!(*resets.lock().unwrap(), 1);
+        // An EOU marker in the speech-chunk path triggers the hard reset.
+        assert_eq!(*handles.hard_resets.lock().unwrap(), 1);
+        assert_eq!(*handles.soft_resets.lock().unwrap(), 0);
     }
 
     #[tokio::test]
-    async fn test_finalize_flushes_with_silence_without_reset() {
-        let (mut session, received, resets) = stub_session(vec![
+    async fn test_finalize_flushes_with_silence_and_soft_resets_on_last_chunk() {
+        let (mut session, handles) = stub_session(vec![
             // First real chunk produces some delta without EOU.
             Ok("partial".to_string()),
             // Three silence-flush chunks emit nothing.
@@ -696,16 +728,19 @@ mod tests {
         let out = session.finalize_utterance().await.unwrap();
         assert_eq!(out, "partial");
         // One real + three silence flush chunks = 4 transcribe calls.
-        assert_eq!(received.lock().unwrap().len(), 4);
-        // Finalize must NOT reset the model — a reset would force a full
-        // `ParakeetEOU::from_pretrained` reload and suppress transcription
-        // for the first ~1 s of the next utterance.
-        assert_eq!(*resets.lock().unwrap(), 0);
+        assert_eq!(handles.received.lock().unwrap().len(), 4);
+        // Only the last flush chunk uses the `reset_on_eou=true` path —
+        // enough to clear the decoder's RNN-T state between utterances.
+        assert_eq!(*handles.soft_resets.lock().unwrap(), 1);
+        // The hard reset (full `ParakeetEOU::from_pretrained` reload) is NOT
+        // invoked: it would trigger a MIN_BUFFER_SAMPLES warm-up that drops
+        // the first ~1 s of the next utterance.
+        assert_eq!(*handles.hard_resets.lock().unwrap(), 0);
     }
 
     #[tokio::test]
     async fn test_finalize_with_carry_over_pads_to_full_chunk() {
-        let (mut session, received, _) = stub_session(vec![
+        let (mut session, handles) = stub_session(vec![
             // Padded carry-over chunk
             Ok(String::new()),
             // Three silence flush chunks
@@ -719,10 +754,11 @@ mod tests {
         let out = session.finalize_utterance().await.unwrap();
         assert_eq!(out, "trailing");
         // 1 padded carry-over + 3 silence flush chunks = 4 dispatches.
-        assert_eq!(received.lock().unwrap().len(), 4);
+        assert_eq!(handles.received.lock().unwrap().len(), 4);
         // The padded chunk must be exactly `EOU_CHUNK_SAMPLES` long.
-        for chunk in received.lock().unwrap().iter() {
+        for chunk in handles.received.lock().unwrap().iter() {
             assert_eq!(chunk.len(), EOU_CHUNK_SAMPLES);
         }
+        assert_eq!(*handles.soft_resets.lock().unwrap(), 1);
     }
 }
