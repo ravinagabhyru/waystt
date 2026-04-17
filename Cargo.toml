@@ -25,6 +25,9 @@ cpal = "0.15"
 whisper-rs = "0.15"
 hound = "3.5"
 
+# Parakeet local transcription (optional NVIDIA Parakeet models via ONNX)
+parakeet-rs = { version = "0.2.5", optional = true, default-features = false }
+
 
 # JSON parsing for API responses
 serde_json = "1.0"
@@ -56,6 +59,11 @@ path = "src/bin/waystt.rs"
 [[bin]]
 name = "wayctl"
 path = "src/bin/wayctl.rs"
+
+[features]
+default = []
+parakeet = ["parakeet-rs"]
+parakeet-cuda = ["parakeet", "parakeet-rs/cuda"]
 
 [profile.release]
 opt-level = 3

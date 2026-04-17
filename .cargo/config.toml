@@ -2,6 +2,11 @@
 # Enable incremental compilation for faster builds
 incremental = true
 
+[env]
+# Use pre-bundled whisper-rs-sys bindings to avoid bindgen regeneration issues
+# with clang 22 generating incomplete opaque types for _IO_FILE and whisper_full_params
+WHISPER_DONT_GENERATE_BINDINGS = "1"
+
 # Uncomment to use lld linker for faster linking (requires lld installation)
 # [target.x86_64-unknown-linux-gnu]
 # linker = "clang"

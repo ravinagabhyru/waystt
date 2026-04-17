@@ -9,6 +9,9 @@ pub mod google_v2;
 pub mod google_v2_rest;
 // Local whisper provider using whisper-rs
 pub mod local;
+// Parakeet provider using NVIDIA Parakeet models via ONNX Runtime
+#[cfg(feature = "parakeet")]
+pub mod parakeet;
 
 #[derive(Debug)]
 pub struct ApiErrorDetails {
@@ -106,6 +109,8 @@ pub enum ProviderKind {
     OpenAI,
     Google,
     Local,
+    #[cfg(feature = "parakeet")]
+    Parakeet,
 }
 
 pub struct TranscriptionFactory;
@@ -158,6 +163,17 @@ impl TranscriptionFactory {
                 .await?;
 
                 Ok(Box::new(client))
+            }
+            #[cfg(feature = "parakeet")]
+            ProviderKind::Parakeet => {
+                let model_path = if let Some(ref custom_path) = cfg.parakeet_model_path {
+                    std::path::PathBuf::from(custom_path)
+                } else {
+                    crate::config::Config::parakeet_model_path(&cfg.parakeet_model_type)
+                };
+                let model_type = parakeet::ParakeetModelType::parse(&cfg.parakeet_model_type);
+                let provider = parakeet::ParakeetProvider::new(&model_path, model_type)?;
+                Ok(Box::new(provider))
             }
         }
     }

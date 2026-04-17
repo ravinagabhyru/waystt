@@ -26,6 +26,9 @@ pub struct Config {
     pub google_speech_language_code: String,
     pub google_speech_model: String,
     pub google_speech_alternative_languages: Vec<String>,
+    // Parakeet configuration
+    pub parakeet_model_type: String,
+    pub parakeet_model_path: Option<String>,
 }
 
 impl Default for Config {
@@ -49,6 +52,9 @@ impl Default for Config {
             google_speech_language_code: "en-US".to_string(),
             google_speech_model: "latest_long".to_string(),
             google_speech_alternative_languages: vec![],
+            // Parakeet defaults
+            parakeet_model_type: "ctc".to_string(),
+            parakeet_model_path: None,
         }
     }
 }
@@ -66,6 +72,20 @@ impl Config {
     #[must_use]
     pub fn model_path(model: &str) -> PathBuf {
         Self::model_dir().join(model)
+    }
+
+    /// Directory where parakeet models are stored
+    #[must_use]
+    pub fn parakeet_model_dir() -> PathBuf {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".local/share/applications/waystt/parakeet")
+    }
+
+    /// Full path to a parakeet model directory based on model type
+    #[must_use]
+    pub fn parakeet_model_path(model_type: &str) -> PathBuf {
+        Self::parakeet_model_dir().join(model_type)
     }
 
     /// Load configuration from environment variables
@@ -161,6 +181,12 @@ impl Config {
                 .collect();
         }
 
+        // Load Parakeet configuration
+        if let Ok(model_type) = std::env::var("PARAKEET_MODEL_TYPE") {
+            config.parakeet_model_type = model_type.to_lowercase();
+        }
+        config.parakeet_model_path = std::env::var("PARAKEET_MODEL_PATH").ok();
+
         config
     }
 
@@ -205,10 +231,32 @@ impl Config {
                     ));
                 }
             }
+            "parakeet" => {
+                #[cfg(not(feature = "parakeet"))]
+                {
+                    return Err(anyhow::anyhow!(
+                        "Parakeet provider is not available. Rebuild with --features parakeet"
+                    ));
+                }
+                #[cfg(feature = "parakeet")]
+                {
+                    let model_path = if let Some(ref custom_path) = self.parakeet_model_path {
+                        std::path::PathBuf::from(custom_path)
+                    } else {
+                        Config::parakeet_model_path(&self.parakeet_model_type)
+                    };
+                    if !model_path.exists() {
+                        return Err(anyhow::anyhow!(
+                            "Parakeet model not found at {}. Download models from HuggingFace to this directory.",
+                            model_path.display()
+                        ));
+                    }
+                }
+            }
             _ => {
                 let provider = &self.transcription_provider;
                 return Err(anyhow::anyhow!(
-                    "Unsupported transcription provider: {provider}. Supported providers: openai, google, local"
+                    "Unsupported transcription provider: {provider}. Supported providers: openai, google, local, parakeet"
                 ));
             }
         }
@@ -278,11 +326,11 @@ pub fn bootstrap(envfile: Option<&Path>) -> anyhow::Result<Config> {
             Config::from_env()
         }
     };
-    // Validate configuration but allow non-fatal warnings for providers other than local
+    // Validate configuration but allow non-fatal warnings for providers other than local/parakeet
     if let Err(e) = cfg.validate() {
         eprintln!("Configuration warning: {e}");
-        if cfg.transcription_provider == "local" {
-            // For local provider, validation is strict because model presence is required
+        if cfg.transcription_provider == "local" || cfg.transcription_provider == "parakeet" {
+            // For local providers, validation is strict because model presence is required
             return Err(e);
         }
     }
@@ -296,6 +344,8 @@ impl Config {
         match self.transcription_provider.to_lowercase().as_str() {
             "google" => crate::transcription::ProviderKind::Google,
             "local" => crate::transcription::ProviderKind::Local,
+            #[cfg(feature = "parakeet")]
+            "parakeet" => crate::transcription::ProviderKind::Parakeet,
             _ => crate::transcription::ProviderKind::OpenAI,
         }
     }
@@ -328,6 +378,8 @@ mod tests {
         env::remove_var("GOOGLE_SPEECH_LANGUAGE_CODE");
         env::remove_var("GOOGLE_SPEECH_MODEL");
         env::remove_var("GOOGLE_SPEECH_ALTERNATIVE_LANGUAGES");
+        env::remove_var("PARAKEET_MODEL_TYPE");
+        env::remove_var("PARAKEET_MODEL_PATH");
     }
 
     #[test]
@@ -349,6 +401,9 @@ mod tests {
         assert_eq!(config.google_speech_language_code, "en-US");
         assert_eq!(config.google_speech_model, "latest_long");
         assert!(config.google_speech_alternative_languages.is_empty());
+        // Parakeet defaults
+        assert_eq!(config.parakeet_model_type, "ctc");
+        assert_eq!(config.parakeet_model_path, None);
     }
 
     #[tokio::test]

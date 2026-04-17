@@ -380,10 +380,21 @@ impl App {
         } else {
             "Idle"
         };
+        let model = match self.config.provider_kind() {
+            crate::transcription::ProviderKind::OpenAI => self.config.whisper_model.clone(),
+            crate::transcription::ProviderKind::Google => {
+                self.config.google_speech_model.clone()
+            }
+            crate::transcription::ProviderKind::Local => self.config.whisper_model.clone(),
+            #[cfg(feature = "parakeet")]
+            crate::transcription::ProviderKind::Parakeet => {
+                format!("parakeet-{}", self.config.parakeet_model_type)
+            }
+        };
         crate::ipc::IpcResult {
             state: state.to_string(),
             provider: format!("{:?}", self.config.provider_kind()),
-            model: self.config.whisper_model.clone(),
+            model,
             ..crate::ipc::IpcResult::default()
         }
     }
