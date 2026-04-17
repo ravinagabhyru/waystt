@@ -47,6 +47,15 @@ const EOU_CHUNK_SAMPLES: usize = 2560;
 /// buffered inside the encoder. The parakeet-rs author's pattern is 3 chunks.
 const FLUSH_SILENCE_CHUNKS: usize = 3;
 
+/// At session start, pre-feed this many silent chunks so the model's internal
+/// `audio_buffer` (vendor `parakeet_eou.rs:100-103`) is past `MIN_BUFFER_SAMPLES`
+/// (1 s at 16 kHz) before the user's first word arrives. Without this, the
+/// session's very first utterance has its leading ~1 s silently swallowed as
+/// the buffer fills, producing truncated or garbled transcription only for
+/// the first utterance of each session. Uses 7 chunks (~1.12 s) to add a
+/// small margin over the exact 6.25-chunk threshold.
+const WARMUP_SILENCE_CHUNKS: usize = 7;
+
 /// Marker the parakeet-rs `ParakeetEOU::transcribe` appends when end-of-utterance
 /// is detected and `reset_on_eou=true` (see `parakeet_eou.rs:169` in the crate).
 const EOU_MARKER: &str = " [EOU]";
@@ -215,11 +224,18 @@ impl StreamingTranscriptionProvider for ParakeetStreamingProvider {
         }
 
         let model_path = self.model.model_path.clone();
-        let session = ParakeetEouSession::spawn(move || {
+        let mut session = ParakeetEouSession::spawn(move || {
             let eou: Box<dyn EouInference> = Box::new(RealEou::new(model_path)?);
             Ok(eou)
         })
         .await?;
+        // Pre-warm the vendor model's internal audio_buffer past its
+        // MIN_BUFFER_SAMPLES gate. Any deltas produced from pure silence are
+        // discarded here; the session's accumulator is reset so the first
+        // real utterance starts clean.
+        let warmup = vec![0.0f32; WARMUP_SILENCE_CHUNKS * EOU_CHUNK_SAMPLES];
+        session.push_samples(&warmup).await?;
+        session.accumulator.clear();
         Ok(Box::new(session))
     }
 }

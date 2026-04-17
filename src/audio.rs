@@ -98,13 +98,7 @@ impl AudioRecorder {
                         }
                     }
 
-                    let old_len = audio_buffer.len();
                     audio_buffer.extend_from_slice(data);
-
-                    if old_len == 0 && !audio_buffer.is_empty() {
-                        let len = data.len();
-                        eprintln!("🎤 First audio samples captured! Got {len} samples");
-                    }
                 }
             },
             |err| {
