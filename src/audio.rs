@@ -10,6 +10,7 @@ use cpal::{
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use tokio::sync::Notify;
 
 const SAMPLE_RATE: u32 = 16000;
 const CHANNELS: u16 = 1;
@@ -21,6 +22,11 @@ const MAX_BUFFER_SIZE: usize = SAMPLE_RATE as usize * MAX_RECORDING_DURATION_SEC
 pub struct AudioRecorder {
     buffer: Arc<Mutex<Vec<f32>>>,
     is_recording: Arc<AtomicBool>,
+    /// Signalled once per CPAL callback so async consumers can wake on new
+    /// audio instead of polling. A single `Notify` coalesces multiple pending
+    /// callbacks into one wake-up, which matches "drain everything available
+    /// now" semantics exactly.
+    audio_notify: Arc<Notify>,
     stream: Option<Stream>,
     device: Option<Device>,
 }
@@ -35,9 +41,18 @@ impl AudioRecorder {
         Ok(Self {
             buffer: Arc::new(Mutex::new(Vec::new())),
             is_recording: Arc::new(AtomicBool::new(false)),
+            audio_notify: Arc::new(Notify::new()),
             stream: None,
             device: None,
         })
+    }
+
+    /// Handle to the new-audio notifier. Cloneable; wake-ups fire on every
+    /// CPAL callback that delivers samples. Call `.notified().await` to
+    /// block until the next buffer is available.
+    #[must_use]
+    pub fn audio_notify(&self) -> Arc<Notify> {
+        Arc::clone(&self.audio_notify)
     }
 
     /// Start audio recording
@@ -79,8 +94,11 @@ impl AudioRecorder {
         let channels = config.channels;
         eprintln!("📊 Audio config: {sample_rate}Hz, {channels} channels");
 
-        // Clone buffer for the stream callback
+        // Clones the stream callback needs. The CPAL callback runs on its own
+        // thread (outside the tokio runtime); it must only perform lock-free
+        // or short-critical-section work. `Notify::notify_one` is lock-free.
         let buffer_clone = Arc::clone(&self.buffer);
+        let notify_clone = Arc::clone(&self.audio_notify);
 
         // Create audio input stream
         let stream = device.build_input_stream(
@@ -100,6 +118,11 @@ impl AudioRecorder {
 
                     audio_buffer.extend_from_slice(data);
                 }
+                // Wake any async consumer waiting on new audio. This replaces
+                // a 50 ms polling loop — wake latency drops from ~25 ms
+                // average to near zero. `notify_one` stores a permit if no
+                // task is currently awaiting, so we never lose a wake-up.
+                notify_clone.notify_one();
             },
             |err| {
                 eprintln!("❌ Audio stream error: {err}");

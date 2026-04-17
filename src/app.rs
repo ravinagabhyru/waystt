@@ -99,6 +99,7 @@ impl App {
         }
 
         let mut signals = signals::build_signal_stream()?;
+        let audio_notify = self.recorder.audio_notify();
 
         loop {
             if let Err(e) = self.recorder.process_audio_events() {
@@ -118,8 +119,8 @@ impl App {
                         None => break,
                     }
                 }
-                // Drive continuous-mode processing on a short interval.
-                () = tokio::time::sleep(tokio::time::Duration::from_millis(50)) => {
+                // Wake immediately when CPAL delivers a new audio buffer.
+                () = audio_notify.notified() => {
                     if let Err(e) = self.ipc_continuous_process().await {
                         eprintln!("Continuous processing error: {e}");
                     }
@@ -144,6 +145,12 @@ impl App {
 
     pub(crate) fn is_recording(&self) -> bool {
         self.recorder.is_recording()
+    }
+
+    /// Handle to the recorder's new-audio notifier. Exposed so the IPC loop
+    /// can wake on CPAL callbacks instead of polling.
+    pub(crate) fn audio_notify(&self) -> std::sync::Arc<tokio::sync::Notify> {
+        self.recorder.audio_notify()
     }
 
     // IPC helpers: used by the Unix socket server

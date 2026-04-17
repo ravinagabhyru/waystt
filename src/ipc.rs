@@ -131,8 +131,11 @@ pub async fn serve(mut app: App, socket_path: PathBuf) -> Result<()> {
 
     eprintln!("✅ waystt IPC listening on {}", socket_path.display());
 
+    let audio_notify = app.audio_notify();
+
     loop {
-        // Use select! to handle both IPC connections and continuous mode processing
+        // Use select! to handle both IPC connections and audio-driven
+        // continuous-mode processing.
         tokio::select! {
             accept_result = listener.accept() => {
                 match accept_result {
@@ -147,9 +150,10 @@ pub async fn serve(mut app: App, socket_path: PathBuf) -> Result<()> {
                     }
                 }
             }
-            // Process continuous mode audio every 50ms
-            _ = tokio::time::sleep(tokio::time::Duration::from_millis(50)) => {
-                // Process continuous mode if active
+            // Wake immediately when CPAL delivers a new audio buffer.
+            // `notify_one` on the CPAL side coalesces bursts, so one wake
+            // reliably drains all samples queued since the last pass.
+            () = audio_notify.notified() => {
                 if let Err(e) = app.ipc_continuous_process().await {
                     eprintln!("Continuous processing error: {e}");
                 }
