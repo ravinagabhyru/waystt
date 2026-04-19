@@ -15,6 +15,7 @@ pub mod config;
 pub mod continuous;
 pub mod ipc;
 pub mod pipeline;
+pub mod refine;
 pub mod signals;
 
 // Re-export existing modules for backward-compatibility and tests
@@ -35,7 +36,7 @@ pub mod wav;
 /// Returns an error if configuration bootstrap fails, model download fails, or application initialization fails
 pub async fn run(options: cli::RunOptions) -> Result<i32> {
     // Bootstrap configuration
-    let config = crate::config::bootstrap(options.envfile.as_deref())?;
+    let config = crate::config::bootstrap(options.config_path.as_deref())?;
 
     // Handle model download early and exit if requested
     if options.download_model {
@@ -59,9 +60,24 @@ pub async fn run(options: cli::RunOptions) -> Result<i32> {
             .await?
             .map(std::sync::Arc::from);
 
+    // Build optional LLM refiner (returns Ok(None) when disabled)
+    let text_refiner = match crate::refine::try_build(&config) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("LLM refinement disabled: {e}");
+            None
+        }
+    };
+
     // Create app
-    let app =
-        crate::app::App::init(options.clone(), config, provider, streaming_provider).await?;
+    let app = crate::app::App::init(
+        options.clone(),
+        config,
+        provider,
+        streaming_provider,
+        text_refiner,
+    )
+    .await?;
 
     match options.mode {
         crate::cli::RunMode::Daemon => {

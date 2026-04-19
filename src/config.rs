@@ -2,7 +2,8 @@
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 /// Configuration for waystt loaded from environment variables
@@ -29,6 +30,192 @@ pub struct Config {
     // Parakeet configuration
     pub parakeet_model_type: String,
     pub parakeet_model_path: Option<String>,
+    // LLM post-processing ("refinement") configuration
+    pub llm_refine_enabled: bool,
+    pub llm_refine_apply_batch: bool,
+    pub llm_refine_apply_continuous: bool,
+    pub llm_refine_base_url: Option<String>,
+    pub llm_refine_api_key: Option<String>,
+    pub llm_refine_model: String,
+    pub llm_refine_timeout_ms: u64,
+    pub llm_refine_system_prompt: Option<String>,
+    pub llm_refine_max_tokens: Option<u32>,
+    pub llm_refine_min_chars: usize,
+}
+
+/// TOML-facing representation of the config file. Sections map to the
+/// grouped `[audio]`, `[openai]`, … blocks. Every field is optional so
+/// partial files are valid; absent values fall back to [`Config::default`].
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ConfigFile {
+    transcription_provider: Option<String>,
+    rust_log: Option<String>,
+    audio: AudioSection,
+    beep: BeepSection,
+    openai: OpenAiSection,
+    whisper: WhisperSection,
+    google: GoogleSection,
+    parakeet: ParakeetSection,
+    llm_refine: LlmRefineSection,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct AudioSection {
+    sample_rate: Option<u32>,
+    channels: Option<u16>,
+    buffer_duration_seconds: Option<usize>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct BeepSection {
+    enabled: Option<bool>,
+    volume: Option<f32>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct OpenAiSection {
+    api_key: Option<String>,
+    base_url: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct WhisperSection {
+    model: Option<String>,
+    language: Option<String>,
+    timeout_seconds: Option<u64>,
+    max_retries: Option<u32>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct GoogleSection {
+    application_credentials: Option<String>,
+    language_code: Option<String>,
+    model: Option<String>,
+    alternative_languages: Option<Vec<String>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ParakeetSection {
+    model_type: Option<String>,
+    model_path: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct LlmRefineSection {
+    enabled: Option<bool>,
+    apply_batch: Option<bool>,
+    apply_continuous: Option<bool>,
+    base_url: Option<String>,
+    api_key: Option<String>,
+    model: Option<String>,
+    timeout_ms: Option<u64>,
+    system_prompt: Option<String>,
+    max_tokens: Option<u32>,
+    min_chars: Option<usize>,
+}
+
+impl ConfigFile {
+    /// Apply non-empty values from a parsed TOML file onto `config`.
+    fn merge_into(self, config: &mut Config) {
+        if let Some(v) = self.transcription_provider {
+            config.transcription_provider = v;
+        }
+        if let Some(v) = self.rust_log {
+            config.rust_log = v;
+        }
+        if let Some(v) = self.audio.sample_rate {
+            config.audio_sample_rate = v;
+        }
+        if let Some(v) = self.audio.channels {
+            config.audio_channels = v;
+        }
+        if let Some(v) = self.audio.buffer_duration_seconds {
+            config.audio_buffer_duration_seconds = v;
+        }
+        if let Some(v) = self.beep.enabled {
+            config.enable_audio_feedback = v;
+        }
+        if let Some(v) = self.beep.volume {
+            config.beep_volume = v.clamp(0.0, 1.0);
+        }
+        if self.openai.api_key.is_some() {
+            config.openai_api_key = self.openai.api_key;
+        }
+        if self.openai.base_url.is_some() {
+            config.openai_base_url = self.openai.base_url;
+        }
+        if let Some(v) = self.whisper.model {
+            config.whisper_model = v;
+        }
+        if let Some(v) = self.whisper.language {
+            config.whisper_language = v;
+        }
+        if let Some(v) = self.whisper.timeout_seconds {
+            config.whisper_timeout_seconds = v;
+        }
+        if let Some(v) = self.whisper.max_retries {
+            config.whisper_max_retries = v;
+        }
+        if self.google.application_credentials.is_some() {
+            config.google_application_credentials = self.google.application_credentials;
+        }
+        if let Some(v) = self.google.language_code {
+            config.google_speech_language_code = v;
+        }
+        if let Some(v) = self.google.model {
+            config.google_speech_model = v;
+        }
+        if let Some(v) = self.google.alternative_languages {
+            config.google_speech_alternative_languages = v;
+        }
+        if let Some(v) = self.parakeet.model_type {
+            config.parakeet_model_type = v.to_lowercase();
+        }
+        if self.parakeet.model_path.is_some() {
+            config.parakeet_model_path = self.parakeet.model_path;
+        }
+        if let Some(v) = self.llm_refine.enabled {
+            config.llm_refine_enabled = v;
+        }
+        if let Some(v) = self.llm_refine.apply_batch {
+            config.llm_refine_apply_batch = v;
+        }
+        if let Some(v) = self.llm_refine.apply_continuous {
+            config.llm_refine_apply_continuous = v;
+        }
+        if self.llm_refine.base_url.is_some() {
+            config.llm_refine_base_url = self.llm_refine.base_url;
+        }
+        if self.llm_refine.api_key.is_some() {
+            config.llm_refine_api_key = self.llm_refine.api_key;
+        }
+        if let Some(v) = self.llm_refine.model {
+            if !v.trim().is_empty() {
+                config.llm_refine_model = v;
+            }
+        }
+        if let Some(v) = self.llm_refine.timeout_ms {
+            config.llm_refine_timeout_ms = v;
+        }
+        if self.llm_refine.system_prompt.is_some() {
+            config.llm_refine_system_prompt =
+                self.llm_refine.system_prompt.filter(|s| !s.is_empty());
+        }
+        if let Some(v) = self.llm_refine.max_tokens {
+            config.llm_refine_max_tokens = Some(v);
+        }
+        if let Some(v) = self.llm_refine.min_chars {
+            config.llm_refine_min_chars = v;
+        }
+    }
 }
 
 impl Default for Config {
@@ -55,6 +242,17 @@ impl Default for Config {
             // Parakeet defaults
             parakeet_model_type: "ctc".to_string(),
             parakeet_model_path: None,
+            // LLM refinement defaults (disabled)
+            llm_refine_enabled: false,
+            llm_refine_apply_batch: true,
+            llm_refine_apply_continuous: true,
+            llm_refine_base_url: None,
+            llm_refine_api_key: None,
+            llm_refine_model: "gpt-4o-mini".to_string(),
+            llm_refine_timeout_ms: 5000,
+            llm_refine_system_prompt: None,
+            llm_refine_max_tokens: None,
+            llm_refine_min_chars: 0,
         }
     }
 }
@@ -88,17 +286,30 @@ impl Config {
         Self::parakeet_model_dir().join(model_type)
     }
 
-    /// Load configuration from environment variables
-    #[allow(clippy::field_reassign_with_default)]
+    /// Build a Config from environment variables alone (no file).
+    /// Equivalent to `Config::default()` then [`Config::apply_env_overrides`].
     #[must_use]
     pub fn from_env() -> Self {
         let mut config = Config::default();
+        config.apply_env_overrides();
+        config
+    }
 
-        // Load OpenAI API key
-        config.openai_api_key = std::env::var("OPENAI_API_KEY").ok();
+    /// Overlay environment variables onto `self`. Every variable is optional
+    /// and invalid numeric values are silently ignored. Env vars take
+    /// precedence over file-loaded values.
+    #[allow(clippy::too_many_lines)]
+    pub fn apply_env_overrides(&mut self) {
+        let config = self;
 
-        // Load OpenAI base URL
-        config.openai_base_url = std::env::var("OPENAI_BASE_URL").ok();
+        // Load OpenAI API key (only overrides when the env var is set; an
+        // unset env var must not wipe out a value loaded from config.toml).
+        if let Ok(v) = std::env::var("OPENAI_API_KEY") {
+            config.openai_api_key = Some(v);
+        }
+        if let Ok(v) = std::env::var("OPENAI_BASE_URL") {
+            config.openai_base_url = Some(v);
+        }
 
         // Load transcription provider
         if let Ok(provider) = std::env::var("TRANSCRIPTION_PROVIDER") {
@@ -162,8 +373,9 @@ impl Config {
         }
 
         // Load Google Speech-to-Text configuration
-        config.google_application_credentials =
-            std::env::var("GOOGLE_APPLICATION_CREDENTIALS").ok();
+        if let Ok(v) = std::env::var("GOOGLE_APPLICATION_CREDENTIALS") {
+            config.google_application_credentials = Some(v);
+        }
 
         if let Ok(language) = std::env::var("GOOGLE_SPEECH_LANGUAGE_CODE") {
             config.google_speech_language_code = language;
@@ -185,19 +397,68 @@ impl Config {
         if let Ok(model_type) = std::env::var("PARAKEET_MODEL_TYPE") {
             config.parakeet_model_type = model_type.to_lowercase();
         }
-        config.parakeet_model_path = std::env::var("PARAKEET_MODEL_PATH").ok();
+        if let Ok(v) = std::env::var("PARAKEET_MODEL_PATH") {
+            config.parakeet_model_path = Some(v);
+        }
 
-        config
+        // Load LLM refinement configuration
+        if let Ok(v) = std::env::var("LLM_REFINE_ENABLED") {
+            config.llm_refine_enabled = v.to_lowercase() == "true";
+        }
+        if let Ok(v) = std::env::var("LLM_REFINE_APPLY_BATCH") {
+            config.llm_refine_apply_batch = v.to_lowercase() == "true";
+        }
+        if let Ok(v) = std::env::var("LLM_REFINE_APPLY_CONTINUOUS") {
+            config.llm_refine_apply_continuous = v.to_lowercase() == "true";
+        }
+        if let Ok(v) = std::env::var("LLM_REFINE_BASE_URL") {
+            config.llm_refine_base_url = Some(v);
+        }
+        if let Ok(v) = std::env::var("LLM_REFINE_API_KEY") {
+            config.llm_refine_api_key = Some(v);
+        }
+        if let Ok(v) = std::env::var("LLM_REFINE_MODEL") {
+            if !v.trim().is_empty() {
+                config.llm_refine_model = v;
+            }
+        }
+        if let Ok(v) = std::env::var("LLM_REFINE_TIMEOUT_MS") {
+            if let Ok(parsed) = v.parse::<u64>() {
+                config.llm_refine_timeout_ms = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("LLM_REFINE_SYSTEM_PROMPT") {
+            config.llm_refine_system_prompt = if v.is_empty() { None } else { Some(v) };
+        }
+        if let Ok(v) = std::env::var("LLM_REFINE_MAX_TOKENS") {
+            if let Ok(parsed) = v.parse::<u32>() {
+                config.llm_refine_max_tokens = Some(parsed);
+            }
+        }
+        if let Ok(v) = std::env::var("LLM_REFINE_MIN_CHARS") {
+            if let Ok(parsed) = v.parse::<usize>() {
+                config.llm_refine_min_chars = parsed;
+            }
+        }
     }
 
-    /// Load environment file and return config
+    /// Load a TOML config file into a fresh Config (defaults → file values).
+    /// Env-var overlay is NOT applied here; callers that want env overrides
+    /// must also call [`Config::apply_env_overrides`].
     ///
     /// # Errors
     ///
-    /// Returns an error if the environment file cannot be read or parsed
-    pub fn load_env_file<P: AsRef<Path>>(path: P) -> Result<Self> {
-        dotenvy::from_path(path)?;
-        Ok(Self::from_env())
+    /// Returns an error if the file cannot be read or is not valid TOML
+    /// matching the expected schema (unknown keys are rejected).
+    pub fn load_toml_file<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let path = path.as_ref();
+        let contents = std::fs::read_to_string(path)
+            .with_context(|| format!("reading config file {}", path.display()))?;
+        let parsed: ConfigFile = toml::from_str(&contents)
+            .with_context(|| format!("parsing config file {}", path.display()))?;
+        let mut config = Config::default();
+        parsed.merge_into(&mut config);
+        Ok(config)
     }
 
     /// Validate configuration
@@ -211,7 +472,7 @@ impl Config {
             "openai" => {
                 if self.openai_api_key.is_none() {
                     return Err(anyhow::anyhow!(
-                        "OPENAI_API_KEY is required when using OpenAI provider. Please set it in your .env file."
+                        "OPENAI_API_KEY (or [openai].api_key in config.toml) is required when using the OpenAI provider."
                     ));
                 }
             }
@@ -292,40 +553,49 @@ pub fn load_config() -> Config {
     Config::from_env()
 }
 
-/// Return the default envfile path, i.e. ~/.config/waystt/.env
+/// Return the default config path, i.e. `~/.config/waystt/config.toml`.
 #[must_use]
-pub fn default_envfile() -> PathBuf {
+pub fn default_config_path() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| std::env::var("HOME").map_or_else(|_| PathBuf::from("."), PathBuf::from))
         .join("waystt")
-        .join(".env")
+        .join("config.toml")
 }
 
-/// Bootstrap configuration, optionally loading from a provided envfile.
-/// If `envfile` is None, attempts to read the default envfile if present,
-/// otherwise falls back to the process environment. Always returns a validated Config
-/// or an error with a clear message.
+/// Bootstrap configuration.
+///
+/// Loads `~/.config/waystt/config.toml` by default, or the file at
+/// `config_path` when provided, then overlays environment variables. Env
+/// vars always win over file values.
+///
+/// Behavior when the file is missing:
+/// - explicit `config_path` → error,
+/// - default path → silently use env vars only.
 ///
 /// # Errors
 ///
-/// Returns an error if the environment file cannot be read or if configuration validation fails
-pub fn bootstrap(envfile: Option<&Path>) -> anyhow::Result<Config> {
-    let cfg = if let Some(path) = envfile {
-        if path.exists() {
-            Config::load_env_file(path)?
-        } else {
-            let display_path = path.display();
-            eprintln!("Environment file {display_path} not found, using system environment");
-            Config::from_env()
+/// Returns an error if the config file cannot be read or parsed, or if
+/// validation fails for local/parakeet providers (missing model files).
+pub fn bootstrap(config_path: Option<&Path>) -> anyhow::Result<Config> {
+    let mut cfg = match config_path {
+        Some(path) => {
+            if !path.exists() {
+                anyhow::bail!("config file not found: {}", path.display());
+            }
+            Config::load_toml_file(path)?
         }
-    } else {
-        let def = default_envfile();
-        if def.exists() {
-            Config::load_env_file(&def)?
-        } else {
-            Config::from_env()
+        None => {
+            let def = default_config_path();
+            if def.exists() {
+                Config::load_toml_file(&def)?
+            } else {
+                maybe_warn_legacy_env_file();
+                Config::default()
+            }
         }
     };
+    cfg.apply_env_overrides();
+
     // Validate configuration but allow non-fatal warnings for providers other than local/parakeet
     if let Err(e) = cfg.validate() {
         eprintln!("Configuration warning: {e}");
@@ -358,6 +628,24 @@ pub fn bootstrap(envfile: Option<&Path>) -> anyhow::Result<Config> {
     Ok(cfg)
 }
 
+/// Warn once if the legacy `~/.config/waystt/.env` file exists but the user
+/// hasn't created `config.toml` — they almost certainly meant for it to be
+/// loaded and are confused about why it's being ignored.
+fn maybe_warn_legacy_env_file() {
+    let legacy = dirs::config_dir()
+        .unwrap_or_else(|| std::env::var("HOME").map_or_else(|_| PathBuf::from("."), PathBuf::from))
+        .join("waystt")
+        .join(".env");
+    if legacy.exists() {
+        eprintln!(
+            "Note: waystt no longer reads {} ; configuration has moved to {}. \
+             See config.toml.example for the new format.",
+            legacy.display(),
+            default_config_path().display()
+        );
+    }
+}
+
 impl Config {
     /// Map the configured provider to the strongly-typed kind.
     #[must_use]
@@ -369,6 +657,18 @@ impl Config {
             "parakeet" => crate::transcription::ProviderKind::Parakeet,
             _ => crate::transcription::ProviderKind::OpenAI,
         }
+    }
+
+    /// True when LLM refinement should run for daemon/batch transcribe flows.
+    #[must_use]
+    pub fn refine_enabled_for_batch(&self) -> bool {
+        self.llm_refine_enabled && self.llm_refine_apply_batch
+    }
+
+    /// True when LLM refinement should run for continuous / streaming emission.
+    #[must_use]
+    pub fn refine_enabled_for_continuous(&self) -> bool {
+        self.llm_refine_enabled && self.llm_refine_apply_continuous
     }
 }
 
@@ -401,6 +701,16 @@ mod tests {
         env::remove_var("GOOGLE_SPEECH_ALTERNATIVE_LANGUAGES");
         env::remove_var("PARAKEET_MODEL_TYPE");
         env::remove_var("PARAKEET_MODEL_PATH");
+        env::remove_var("LLM_REFINE_ENABLED");
+        env::remove_var("LLM_REFINE_APPLY_BATCH");
+        env::remove_var("LLM_REFINE_APPLY_CONTINUOUS");
+        env::remove_var("LLM_REFINE_BASE_URL");
+        env::remove_var("LLM_REFINE_API_KEY");
+        env::remove_var("LLM_REFINE_MODEL");
+        env::remove_var("LLM_REFINE_TIMEOUT_MS");
+        env::remove_var("LLM_REFINE_SYSTEM_PROMPT");
+        env::remove_var("LLM_REFINE_MAX_TOKENS");
+        env::remove_var("LLM_REFINE_MIN_CHARS");
     }
 
     #[test]
@@ -526,49 +836,123 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_load_toml_file() {
+        let mut temp_file = NamedTempFile::new().unwrap();
+        writeln!(temp_file, "transcription_provider = \"openai\"").unwrap();
+        writeln!(temp_file, "rust_log = \"warn\"").unwrap();
+        writeln!(temp_file).unwrap();
+        writeln!(temp_file, "[audio]").unwrap();
+        writeln!(temp_file, "buffer_duration_seconds = 120").unwrap();
+        writeln!(temp_file).unwrap();
+        writeln!(temp_file, "[openai]").unwrap();
+        writeln!(temp_file, "api_key = \"file-api-key\"").unwrap();
+        writeln!(temp_file, "base_url = \"http://localhost:8080\"").unwrap();
+        writeln!(temp_file).unwrap();
+        writeln!(temp_file, "[whisper]").unwrap();
+        writeln!(temp_file, "model = \"whisper-base\"").unwrap();
+
+        let config = Config::load_toml_file(temp_file.path()).unwrap();
+
+        assert_eq!(config.openai_api_key, Some("file-api-key".to_string()));
+        assert_eq!(
+            config.openai_base_url,
+            Some("http://localhost:8080".to_string())
+        );
+        assert_eq!(config.transcription_provider, "openai");
+        assert_eq!(config.audio_buffer_duration_seconds, 120);
+        assert_eq!(config.whisper_model, "whisper-base");
+        assert_eq!(config.rust_log, "warn");
+
+        // Unset fields should retain defaults
+        assert_eq!(config.audio_sample_rate, 16000);
+        assert_eq!(config.audio_channels, 1);
+        assert_eq!(config.whisper_language, "auto");
+    }
+
+    #[test]
+    fn test_load_toml_with_llm_refine_section() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, "[llm_refine]").unwrap();
+        writeln!(f, "enabled = true").unwrap();
+        writeln!(f, "model = \"llama3.2\"").unwrap();
+        writeln!(f, "base_url = \"http://localhost:11434/v1\"").unwrap();
+        writeln!(f, "timeout_ms = 2500").unwrap();
+        writeln!(f, "min_chars = 4").unwrap();
+
+        let c = Config::load_toml_file(f.path()).unwrap();
+        assert!(c.llm_refine_enabled);
+        assert_eq!(c.llm_refine_model, "llama3.2");
+        assert_eq!(
+            c.llm_refine_base_url.as_deref(),
+            Some("http://localhost:11434/v1")
+        );
+        assert_eq!(c.llm_refine_timeout_ms, 2500);
+        assert_eq!(c.llm_refine_min_chars, 4);
+    }
+
+    #[test]
+    fn test_load_nonexistent_toml_file() {
+        let result = Config::load_toml_file("/nonexistent/path/config.toml");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_toml_rejects_unknown_keys() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, "[openai]").unwrap();
+        writeln!(f, "api_key = \"sk-x\"").unwrap();
+        writeln!(f, "typo_field = \"oops\"").unwrap();
+        let result = Config::load_toml_file(f.path());
+        assert!(result.is_err(), "unknown keys must fail");
+    }
+
     #[tokio::test]
-    async fn test_load_env_file() {
+    async fn test_env_overrides_toml_values() {
         #[allow(clippy::await_holding_lock)]
         {
             let _lock = ENV_MUTEX.lock().await;
-
             clear_env_vars();
 
-            // Create a temporary .env file
-            let mut temp_file = NamedTempFile::new().unwrap();
-            writeln!(temp_file, "OPENAI_API_KEY=file-api-key").unwrap();
-            writeln!(temp_file, "AUDIO_BUFFER_DURATION_SECONDS=120").unwrap();
-            writeln!(temp_file, "WHISPER_MODEL=whisper-base").unwrap();
-            writeln!(temp_file, "RUST_LOG=warn").unwrap();
-            writeln!(temp_file, "TRANSCRIPTION_PROVIDER=openai").unwrap();
-            writeln!(temp_file, "OPENAI_BASE_URL=http://localhost:8080").unwrap();
+            let mut f = NamedTempFile::new().unwrap();
+            writeln!(f, "[openai]").unwrap();
+            writeln!(f, "api_key = \"from-file\"").unwrap();
+            writeln!(f, "[whisper]").unwrap();
+            writeln!(f, "model = \"whisper-file\"").unwrap();
 
-            // Load config from file
-            let config = Config::load_env_file(temp_file.path()).unwrap();
+            env::set_var("OPENAI_API_KEY", "from-env");
+            env::set_var("WHISPER_MODEL", "whisper-env");
 
-            assert_eq!(config.openai_api_key, Some("file-api-key".to_string()));
-            assert_eq!(
-                config.openai_base_url,
-                Some("http://localhost:8080".to_string())
-            );
-            assert_eq!(config.transcription_provider, "openai");
-            assert_eq!(config.audio_buffer_duration_seconds, 120);
-            assert_eq!(config.whisper_model, "whisper-base");
-            assert_eq!(config.rust_log, "warn");
+            let mut c = Config::load_toml_file(f.path()).unwrap();
+            c.apply_env_overrides();
 
-            // Other values should be defaults
-            assert_eq!(config.audio_sample_rate, 16000);
-            assert_eq!(config.audio_channels, 1);
-            assert_eq!(config.whisper_language, "auto");
+            assert_eq!(c.openai_api_key.as_deref(), Some("from-env"));
+            assert_eq!(c.whisper_model, "whisper-env");
 
             clear_env_vars();
         }
     }
 
-    #[test]
-    fn test_load_nonexistent_env_file() {
-        let result = Config::load_env_file("/nonexistent/path/.env");
-        assert!(result.is_err());
+    #[tokio::test]
+    async fn test_unset_env_does_not_clobber_toml() {
+        #[allow(clippy::await_holding_lock)]
+        {
+            let _lock = ENV_MUTEX.lock().await;
+            clear_env_vars();
+
+            let mut f = NamedTempFile::new().unwrap();
+            writeln!(f, "[openai]").unwrap();
+            writeln!(f, "api_key = \"keep-me\"").unwrap();
+
+            // OPENAI_API_KEY is NOT set — apply_env_overrides must leave
+            // the file-loaded value alone.
+            let mut c = Config::load_toml_file(f.path()).unwrap();
+            c.apply_env_overrides();
+
+            assert_eq!(c.openai_api_key.as_deref(), Some("keep-me"));
+
+            clear_env_vars();
+        }
     }
 
     #[test]
@@ -887,6 +1271,79 @@ mod tests {
 
         let result = config.validate();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_refine_defaults() {
+        let c = Config::default();
+        assert!(!c.llm_refine_enabled);
+        assert!(c.llm_refine_apply_batch);
+        assert!(c.llm_refine_apply_continuous);
+        assert_eq!(c.llm_refine_model, "gpt-4o-mini");
+        assert_eq!(c.llm_refine_timeout_ms, 5000);
+        assert_eq!(c.llm_refine_min_chars, 0);
+        assert!(!c.refine_enabled_for_batch());
+        assert!(!c.refine_enabled_for_continuous());
+    }
+
+    #[tokio::test]
+    async fn test_refine_env_parsing() {
+        #[allow(clippy::await_holding_lock)]
+        {
+            let _lock = ENV_MUTEX.lock().await;
+            clear_env_vars();
+
+            env::set_var("LLM_REFINE_ENABLED", "true");
+            env::set_var("LLM_REFINE_APPLY_BATCH", "false");
+            env::set_var("LLM_REFINE_APPLY_CONTINUOUS", "true");
+            env::set_var("LLM_REFINE_BASE_URL", "http://localhost:11434/v1");
+            env::set_var("LLM_REFINE_API_KEY", "sk-test");
+            env::set_var("LLM_REFINE_MODEL", "llama3.2");
+            env::set_var("LLM_REFINE_TIMEOUT_MS", "2500");
+            env::set_var("LLM_REFINE_SYSTEM_PROMPT", "Clean it up.");
+            env::set_var("LLM_REFINE_MAX_TOKENS", "200");
+            env::set_var("LLM_REFINE_MIN_CHARS", "5");
+
+            let c = Config::from_env();
+            assert!(c.llm_refine_enabled);
+            assert!(!c.llm_refine_apply_batch);
+            assert!(c.llm_refine_apply_continuous);
+            assert_eq!(
+                c.llm_refine_base_url.as_deref(),
+                Some("http://localhost:11434/v1")
+            );
+            assert_eq!(c.llm_refine_api_key.as_deref(), Some("sk-test"));
+            assert_eq!(c.llm_refine_model, "llama3.2");
+            assert_eq!(c.llm_refine_timeout_ms, 2500);
+            assert_eq!(c.llm_refine_system_prompt.as_deref(), Some("Clean it up."));
+            assert_eq!(c.llm_refine_max_tokens, Some(200));
+            assert_eq!(c.llm_refine_min_chars, 5);
+            assert!(!c.refine_enabled_for_batch());
+            assert!(c.refine_enabled_for_continuous());
+
+            clear_env_vars();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_refine_env_invalid_numbers_fall_back() {
+        #[allow(clippy::await_holding_lock)]
+        {
+            let _lock = ENV_MUTEX.lock().await;
+            clear_env_vars();
+
+            env::set_var("LLM_REFINE_ENABLED", "true");
+            env::set_var("LLM_REFINE_TIMEOUT_MS", "oops");
+            env::set_var("LLM_REFINE_MIN_CHARS", "nope");
+            env::set_var("LLM_REFINE_MAX_TOKENS", "bad");
+
+            let c = Config::from_env();
+            assert_eq!(c.llm_refine_timeout_ms, 5000);
+            assert_eq!(c.llm_refine_min_chars, 0);
+            assert_eq!(c.llm_refine_max_tokens, None);
+
+            clear_env_vars();
+        }
     }
 
     #[tokio::test]

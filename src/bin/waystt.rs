@@ -1,6 +1,6 @@
 use clap::Parser;
 
-use waystt::cli::{default_envfile_path, RunMode, RunOptions};
+use waystt::cli::{RunMode, RunOptions};
 
 #[derive(Parser)]
 #[command(name = "waystt")]
@@ -9,9 +9,11 @@ use waystt::cli::{default_envfile_path, RunMode, RunOptions};
 )]
 #[command(version)]
 struct Args {
-    /// Path to environment file
-    #[arg(long)]
-    envfile: Option<std::path::PathBuf>,
+    /// Path to a TOML config file. Defaults to
+    /// `~/.config/waystt/config.toml` when present. Environment variables
+    /// override any values set in the file.
+    #[arg(long, value_name = "PATH")]
+    config: Option<std::path::PathBuf>,
 
     /// Pipe transcribed text to the specified command
     /// Usage: waystt --pipe-to command args
@@ -34,14 +36,13 @@ struct Args {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    let envfile = args.envfile.or_else(|| Some(default_envfile_path()));
     let mode = if args.continuous {
         RunMode::Continuous
     } else {
         RunMode::Daemon
     };
     let options = RunOptions {
-        envfile,
+        config_path: args.config,
         pipe_to: args.pipe_to,
         download_model: args.download_model,
         mode,

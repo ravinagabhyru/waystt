@@ -105,15 +105,16 @@ async fn test_name() {
 
 ### Running Tests
 - Always set the beep volume to 0, when running tests `BEEP_VOLUME=0.0 cargo test...`
-- When developing/testing, use `--envfile .env` to use the project-local .env file instead of ~/.config/waystt/.env
-- Example: `BEEP_VOLUME=0.0 cargo run -- --envfile .env`
+- When developing/testing, use `--config config.toml` to use the project-local config file instead of ~/.config/waystt/config.toml
+- Example: `BEEP_VOLUME=0.0 cargo run -- --config config.toml`
+- Env vars still work and always override file values (handy for secrets like `OPENAI_API_KEY`).
 
 ## QA Testing Workflow
 
 ### Daemon mode (wayctl-controlled)
 - Launch detached:
   ```bash
-  nohup ./target/release/waystt --envfile .env > /tmp/waystt.log 2>&1 & disown
+  nohup ./target/release/waystt --config config.toml > /tmp/waystt.log 2>&1 & disown
   ```
 - Drive with `wayctl` from a separate shell:
   - `wayctl start` — begin recording (listen for the start beep)
@@ -127,17 +128,17 @@ async fn test_name() {
 
 ### Continuous mode (no daemon)
 ```bash
-nohup ./target/release/waystt --continuous --envfile .env > /tmp/waystt.log 2>&1 & disown
+nohup ./target/release/waystt --continuous --config config.toml > /tmp/waystt.log 2>&1 & disown
 ```
 - Start beep plays on launch, utterances appear on stdout as they finalize
 - `pkill -SIGTERM waystt` (or Ctrl-C if attached) for clean shutdown — expect
   the stop beep and a final stats line
 
 ### Streaming Parakeet smoke test
-1. `TRANSCRIPTION_PROVIDER=parakeet` and `PARAKEET_MODEL_TYPE=eou` in `.env`
+1. `transcription_provider = "parakeet"` and `[parakeet] model_type = "eou"` in `config.toml`
 2. Ensure EOU model files (`encoder.onnx`, `decoder_joint.onnx`, `tokenizer.json`)
    exist under `~/.local/share/applications/waystt/parakeet/eou/`
-3. `waystt --continuous --envfile .env` — expect a single "Pre-loading Parakeet
+3. `waystt --continuous --config config.toml` — expect a single "Pre-loading Parakeet
    EOU model..." log line at startup (warm-up), then instant first-utterance
    latency
 4. Speak two sentences separated by ~1 second of silence; confirm two separate
@@ -156,4 +157,4 @@ Key files for future development:
 - `src/config.rs`: Environment variable configuration
 - `src/transcription/parakeet.rs`: Parakeet CTC / TDT batch provider
 - `src/transcription/parakeet_streaming.rs`: Parakeet EOU streaming provider
-- `.env.example`: Configuration template
+- `config.toml.example`: Configuration template (sectioned TOML; env vars override)

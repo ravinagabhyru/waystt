@@ -102,20 +102,23 @@ async fn inject_text(text: &str) -> Result<()> {
 
 ## Configuration Management
 
-### Environment-Based Configuration
-**Format**: `.env` file support with CLI override
-**Implementation**: 
-- **dotenvy**: Load environment variables from `.env` files
-- **clap**: Command line argument parsing with `--envfile` parameter
-- **Default**: `./.env` file, fallback to system environment
+### File-Based Configuration with Env Overrides
+**Format**: Sectioned TOML file, overlaid by environment variables at runtime.
+**Implementation**:
+- **toml** + **serde**: Parse `config.toml` into a typed `ConfigFile`
+- **clap**: CLI parsing with `--config PATH` override
+- **Default path**: `~/.config/waystt/config.toml` (silently skipped if missing)
+- Env vars are applied after file load and always win — handy for keeping
+  secrets like API keys out of the checked-in file.
 
-**Variables**: 
-- `OPENAI_API_KEY`: Required for transcription
-- `AUDIO_BUFFER_DURATION_SECONDS`: Buffer size limit
-- `WHISPER_MODEL`: Model selection
-- `RUST_LOG`: Logging configuration
+**Key variables** (see `docs/environment-configuration.md` for the full map):
+- `[openai].api_key` / `OPENAI_API_KEY`: Required for OpenAI provider
+- `[audio].buffer_duration_seconds` / `AUDIO_BUFFER_DURATION_SECONDS`: Ring-buffer size
+- `[whisper].model` / `WHISPER_MODEL`: Model selection
+- `[llm_refine].*` / `LLM_REFINE_*`: Optional LLM post-processing knobs
+- `rust_log` / `RUST_LOG`: Logging configuration
 
-**Rationale**: Simple configuration with secure API key management
+**Rationale**: Structured, typed config for humans; env-var escape hatch for secrets and per-invocation tweaks.
 
 ## Dependency Minimization Strategy
 
@@ -127,7 +130,8 @@ async fn inject_text(text: &str) -> Result<()> {
 - **tokio**: Async runtime
 - **anyhow**: Error handling
 - **clap**: Command line argument parsing
-- **dotenvy**: Environment file loading
+- **toml**: TOML config file parsing
+- **serde**: Typed config deserialization
 
 ### Optional Dependencies (Features)
 - **candle-whisper**: Local transcription support

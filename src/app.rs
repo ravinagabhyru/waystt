@@ -9,6 +9,7 @@ use crate::cli::RunOptions;
 use crate::config::Config;
 use crate::continuous::{ContinuousConfig, ContinuousModeController, ContinuousState};
 use crate::pipeline::AudioPipeline;
+use crate::refine::{self, RefineScope, TextRefiner};
 use crate::signals;
 use crate::transcription::{StreamingTranscriptionProvider, TranscriptionProvider};
 
@@ -22,6 +23,8 @@ pub struct App {
     /// (currently only Parakeet EOU). `None` for batch-only providers.
     streaming_provider: Option<Arc<dyn StreamingTranscriptionProvider>>,
     pipe_to: Option<Vec<String>>,
+    /// Optional LLM post-processor applied after transcription.
+    text_refiner: Option<Arc<dyn TextRefiner>>,
     /// Controller for continuous speech recognition mode
     continuous: Option<ContinuousModeController>,
 }
@@ -37,6 +40,7 @@ impl App {
         config: Config,
         provider: Box<dyn TranscriptionProvider>,
         streaming_provider: Option<Arc<dyn StreamingTranscriptionProvider>>,
+        text_refiner: Option<Arc<dyn TextRefiner>>,
     ) -> Result<Self> {
         let beep_config = BeepConfig {
             enabled: config.enable_audio_feedback,
@@ -79,6 +83,7 @@ impl App {
             provider: Arc::from(provider),
             streaming_provider,
             pipe_to: options.pipe_to,
+            text_refiner,
             continuous: None,
         })
     }
@@ -248,6 +253,17 @@ impl App {
             .pipeline
             .transcribe(wav, self.provider.as_ref(), language_opt)
             .await?;
+        let text = if self.config.refine_enabled_for_batch() {
+            refine::refine_or_fallback(
+                self.text_refiner.as_ref(),
+                text,
+                self.config.llm_refine_min_chars,
+                RefineScope::Batch,
+            )
+            .await
+        } else {
+            text
+        };
         Ok(text)
     }
 
@@ -390,12 +406,29 @@ impl App {
         let pipe_to = self.pipe_to.clone();
         let output_mode = options.output;
         let type_newlines = options.type_newlines;
+        let refine_enabled = self.config.refine_enabled_for_continuous();
+        let refine_min_chars = self.config.llm_refine_min_chars;
+        let text_refiner = self.text_refiner.clone();
         tokio::spawn(async move {
             while let Some(text) = output_rx.recv().await {
                 if text.is_empty() {
                     continue;
                 }
                 eprintln!("[Continuous] Transcribed: \"{text}\"");
+                let text = if refine_enabled {
+                    refine::refine_or_fallback(
+                        text_refiner.as_ref(),
+                        text,
+                        refine_min_chars,
+                        RefineScope::Continuous,
+                    )
+                    .await
+                } else {
+                    text
+                };
+                if text.is_empty() {
+                    continue;
+                }
                 if let Some(ref cmd) = pipe_to {
                     match crate::command::execute_with_input(cmd, &text).await {
                         Ok(code) => {

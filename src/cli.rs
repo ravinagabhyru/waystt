@@ -17,14 +17,16 @@ pub enum RunMode {
 /// Options passed from the CLI into the library entrypoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunOptions {
-    pub envfile: Option<PathBuf>,
+    /// Explicit config file path. When `None`, the default
+    /// `~/.config/waystt/config.toml` is used when present.
+    pub config_path: Option<PathBuf>,
     pub pipe_to: Option<Vec<String>>,
     pub download_model: bool,
     pub mode: RunMode,
 }
 
-/// Default path for the env file.
+/// Default path for the config file (`~/.config/waystt/config.toml`).
 #[must_use]
-pub fn default_envfile_path() -> PathBuf {
-    crate::config::default_envfile()
+pub fn default_config_path() -> PathBuf {
+    crate::config::default_config_path()
 }

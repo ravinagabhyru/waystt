@@ -285,37 +285,33 @@ You can now bind `wayctl` commands in your compositor to control the daemon.
 
 ## Configuration
 
-Configuration is read from `~/.config/waystt/.env` by default. You can override this location using the `--envfile` flag:
+Configuration is read from `~/.config/waystt/config.toml` by default. Override the path with `--config`:
 
 ```bash
-waystt --envfile /path/to/custom/.env
+waystt --config /path/to/custom/config.toml
 ```
 
-waystt supports two transcription providers: **OpenAI Whisper** (default) and **Google Speech-to-Text**. Choose the one that best fits your needs.
+Environment variables always override any value set in the file, so you can keep secrets like API keys out of the file and export them at runtime. The env-var name mirrors the legacy naming: `[section].key` maps to `SECTION_KEY` (e.g. `[openai] api_key` → `OPENAI_API_KEY`, `[llm_refine] api_key` → `LLM_REFINE_API_KEY`).
 
-### OpenAI Whisper (Default)
+See [`config.toml.example`](config.toml.example) for the full annotated template.
+
+waystt supports four transcription providers: **Parakeet** (local ONNX, default), **OpenAI Whisper**, **Google Speech-to-Text**, and **local Whisper** (whisper-rs).
+
+### OpenAI Whisper
 
 OpenAI Whisper offers excellent accuracy and supports automatic language detection.
 
-**Required:** Create `~/.config/waystt/.env` with your OpenAI API key:
+```toml
+transcription_provider = "openai"
 
-```bash
-OPENAI_API_KEY=your_api_key_here
-```
+[openai]
+api_key = "sk-..."                 # or export OPENAI_API_KEY
 
-**Optional OpenAI settings:**
-```bash
-# Whisper model (whisper-1 is default, most cost-effective)
-WHISPER_MODEL=whisper-1
-
-# Force specific language (default: auto-detect)
-WHISPER_LANGUAGE=en
-
-# API timeout in seconds
-WHISPER_TIMEOUT_SECONDS=60
-
-# Max retry attempts
-WHISPER_MAX_RETRIES=3
+[whisper]
+model = "whisper-1"                # default
+language = "auto"                  # or "en", "es", ...
+timeout_seconds = 60
+max_retries = 3
 ```
 
 ### Google Speech-to-Text
@@ -332,37 +328,28 @@ Google Speech-to-Text provides fast, accurate transcription with support for man
 
 2. **Configure waystt for Google:**
 
-```bash
-# Switch to Google provider
-TRANSCRIPTION_PROVIDER=google
+```toml
+transcription_provider = "google"
 
-# Path to your service account JSON file
-GOOGLE_APPLICATION_CREDENTIALS=/path/to/your/service-account-key.json
-
-# Primary language (default: en-US)
-GOOGLE_SPEECH_LANGUAGE_CODE=en-US
-
-# Model selection (latest_long for longer audio, latest_short for shorter)
-GOOGLE_SPEECH_MODEL=latest_long
-
-# Optional: Alternative languages for auto-detection (comma-separated)
-GOOGLE_SPEECH_ALTERNATIVE_LANGUAGES=es-ES,fr-FR,de-DE
+[google]
+application_credentials = "/path/to/service-account-key.json"
+language_code = "en-US"
+model = "latest_long"              # or "latest_short"
+alternative_languages = ["es-ES", "fr-FR", "de-DE"]   # optional auto-detect
 ```
 
 ### Local Whisper (whisper-rs)
 
 Run transcription locally without sending audio to external APIs. Models are downloaded from [Hugging Face](https://huggingface.co/ggerganov/whisper.cpp) in GGML format.
 
-```bash
-# Switch to local provider
-TRANSCRIPTION_PROVIDER=local
+```toml
+transcription_provider = "local"
 
-# Model file name stored in ~/.local/share/applications/waystt/models/
-WHISPER_MODEL=ggml-base.en.bin
-
-# Download the model and exit
-waystt --download-model
+[whisper]
+model = "ggml-base.en.bin"         # stored under ~/.local/share/applications/waystt/models/
 ```
+
+Download with `waystt --download-model`.
 
 **Available Models (GGML format):**
 - `ggml-tiny.bin` - Fastest, least accurate (39 MB)
@@ -397,17 +384,30 @@ If the configured model is missing, the application will exit with an error. Ope
 
 ### General Settings
 
-**Audio and system settings (apply to both providers):**
-```bash
-# Disable audio beeps
-ENABLE_AUDIO_FEEDBACK=false
+**Audio and system settings (apply to all providers):**
 
-# Adjust beep volume (0.0 to 1.0)
-BEEP_VOLUME=0.1
+```toml
+rust_log = "debug"
 
-# Debug logging
-RUST_LOG=debug
+[beep]
+enabled = false                    # disable start/stop beeps
+volume = 0.1                       # 0.0 to 1.0
 ```
+
+### Optional: LLM post-processing
+
+Pipe transcriptions through an LLM to clean up filler words, fix punctuation, and correct misrecognitions before they reach the output. Covers OpenAI, Anthropic, Ollama, and any OpenAI-compatible endpoint via the `genai` crate.
+
+```toml
+[llm_refine]
+enabled = true
+model = "gpt-4o-mini"              # or "claude-haiku-4-5", "llama3.2", ...
+# base_url = "http://localhost:11434/v1"   # e.g. Ollama
+# api_key = "..."                  # or export LLM_REFINE_API_KEY
+timeout_ms = 5000
+```
+
+Fails soft — any LLM error logs a warning and the original transcript is emitted.
 
 
 ## Troubleshooting
@@ -460,11 +460,11 @@ cargo test
 ### Running with Debug Output
 
 ```bash
-# Using default config location (~/.config/waystt/.env)
+# Using default config location (~/.config/waystt/config.toml)
 RUST_LOG=debug cargo run
 
-# Or using project-local .env file for development
-RUST_LOG=debug cargo run -- --envfile .env
+# Or using a project-local config file for development
+RUST_LOG=debug cargo run -- --config config.toml
 ```
 
 ## Building from Source
@@ -475,8 +475,8 @@ cd waystt
 
 # Create config directory and copy example configuration
 mkdir -p ~/.config/waystt
-cp .env.example ~/.config/waystt/.env
-# Edit ~/.config/waystt/.env with your API key
+cp config.toml.example ~/.config/waystt/config.toml
+# Edit ~/.config/waystt/config.toml with your API key (or export OPENAI_API_KEY)
 
 # Build the project
 cargo build --release

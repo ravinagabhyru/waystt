@@ -15,7 +15,7 @@ signal-hook = "0.3"
 signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
 futures = "0.3"
 clap = { version = "4.0", features = ["derive"] }
-dotenvy = "0.15"
+toml = "0.8"
 dirs = "5.0"
 
 # Audio capture
@@ -27,6 +27,9 @@ hound = "3.5"
 
 # Parakeet local transcription (optional NVIDIA Parakeet models via ONNX)
 parakeet-rs = { version = "0.2.5", optional = true, default-features = false }
+
+# Unified LLM client for optional post-transcription text refinement
+genai = { version = "0.5", optional = true }
 
 
 # JSON parsing for API responses
@@ -61,9 +64,10 @@ name = "wayctl"
 path = "src/bin/wayctl.rs"
 
 [features]
-default = ["parakeet"]
+default = ["parakeet", "llm-refine"]
 parakeet = ["parakeet-rs"]
 parakeet-cuda = ["parakeet", "parakeet-rs/cuda"]
+llm-refine = ["dep:genai"]
 
 [profile.release]
 opt-level = 3

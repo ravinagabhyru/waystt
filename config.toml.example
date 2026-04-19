@@ -1,0 +1,110 @@
+# waystt configuration (TOML)
+#
+# Copy to ~/.config/waystt/config.toml, then edit. Pass a different path
+# with `waystt --config /path/to/config.toml`. Every value is optional;
+# omitted fields fall back to their built-in defaults.
+#
+# Environment variables override any value set here, so you can keep
+# secrets like API keys out of the file and export them at runtime
+# (e.g. `export OPENAI_API_KEY=sk-...`). The env var name mirrors the
+# legacy naming, so the mapping is: [section].key -> SECTION_KEY.
+
+# Transcription provider. One of: "openai", "google", "local", "parakeet".
+transcription_provider = "parakeet"
+
+# Logging verbosity (RUST_LOG-style).
+rust_log = "info"
+
+
+[audio]
+# Capture sample rate. Whisper is trained on 16000.
+sample_rate = 16000
+channels = 1
+# Ring buffer length used to retain audio before stop-and-transcribe.
+buffer_duration_seconds = 300
+
+
+[beep]
+# Start/stop feedback beeps.
+enabled = true
+volume = 0.1
+
+
+[openai]
+# api_key = "sk-..."             # better set via OPENAI_API_KEY env var
+# base_url = "https://api.openai.com/v1"
+
+
+[whisper]
+# Used by both the OpenAI (`whisper-1`) and local providers (a .bin filename).
+model = "whisper-1"
+# "auto" lets the server / model auto-detect.
+language = "auto"
+timeout_seconds = 60
+max_retries = 3
+
+
+[google]
+# Path to your Google Cloud service-account JSON credentials file.
+# application_credentials = "/path/to/service-account-key.json"
+language_code = "en-US"
+model = "latest_long"
+# Optional secondary languages for automatic detection (max 3 total).
+# alternative_languages = ["fr-FR", "es-ES"]
+
+
+[parakeet]
+# "ctc"  - English-only, faster (batch / one-shot transcription only)
+# "tdt"  - Multilingual, 25 languages (batch / one-shot transcription only)
+# "eou"  - English-only, streaming with end-of-utterance detection.
+#          Used automatically in continuous and daemon modes; each detected
+#          utterance is emitted as a separate final string. EOU is rejected
+#          on the one-shot / stop-and-transcribe path — pick ctc or tdt.
+model_type = "eou"
+# Override the default model directory (defaults to
+# ~/.local/share/applications/waystt/parakeet/{model_type}/).
+# model_path = "/path/to/parakeet/model"
+
+
+# --- Optional LLM post-processing --------------------------------------------
+# When enabled, transcribed text is sent to an LLM for cleanup (fix
+# punctuation, remove filler words, collapse false starts, etc.) before
+# being emitted. Fails soft: on any error the original transcript is
+# emitted unchanged. Requires the `llm-refine` Cargo feature (on by default).
+[llm_refine]
+enabled = false
+# Apply in daemon/batch flows (wayctl transcribe / stop-and-transcribe).
+apply_batch = true
+# Apply in continuous / streaming mode. Each utterance incurs one LLM call.
+apply_continuous = true
+# Model name. Provider is inferred from the prefix by the `genai` crate:
+#   gpt-*, o*      -> OpenAI
+#   claude-*       -> Anthropic
+#   gemini-*       -> Gemini
+#   others         -> whichever adapter matches, or Ollama via base URL
+model = "gpt-4o-mini"
+# api_key = "sk-..."                  # better set via LLM_REFINE_API_KEY env var
+# Base URL for OpenAI-compatible endpoints (Ollama, LM Studio, LocalAI,
+# vLLM, Groq, Together, ...). Omit to use the provider's default.
+# base_url = "http://localhost:11434/v1"    # Ollama
+# Per-request timeout in milliseconds. On timeout the original text is emitted.
+timeout_ms = 5000
+# Override the built-in aggressive-cleanup system prompt.
+# system_prompt = ""
+# Cap the LLM's output tokens (optional; omit for adapter default).
+# max_tokens = 256
+# Skip refinement for transcripts shorter than this many characters
+# (useful for "yes", "no", one-word commands, etc.).
+min_chars = 0
+
+# Example: local Ollama with llama3.2
+# [llm_refine]
+# enabled = true
+# model = "llama3.2"
+# base_url = "http://localhost:11434/v1"
+
+# Example: Anthropic Claude Haiku
+# [llm_refine]
+# enabled = true
+# model = "claude-haiku-4-5"
+# api_key = "sk-ant-..."
