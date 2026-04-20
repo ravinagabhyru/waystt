@@ -15,12 +15,15 @@
 //!     `.await` points — the session never crosses a thread boundary;
 //!   * accumulates delta text internally and emits only complete utterances:
 //!     either when EOU is detected, or when the caller force-finalizes;
-//!   * recreates the `ParakeetEOU` instance on every utterance finalize so the
-//!     4 s encoder ring buffer can't leak audio from utterance N into N+1.
-//!     `ParakeetEOU::from_pretrained` re-reads the tokenizer/encoder caches but
-//!     the heavy ONNX `Session` data already lives inside each created instance;
-//!     profile this during QA and fall back to trusting `reset_on_eou` if it's
-//!     too slow in practice (see plan §A).
+//!   * uses the vendor's `reset_on_eou=true` soft-reset path to clear decoder
+//!     RNN-T state (`state_h` / `state_c` / `last_token`) between utterances
+//!     without discarding the encoder cache or audio ring buffer. The vendor
+//!     deliberately keeps those alive (see `parakeet_eou.rs:192-200`, "we need
+//!     to keep encoder cache and audio buffer flowing for continuous context")
+//!     — and we deliberately avoid a `from_pretrained` reload, which would
+//!     re-parse tokenizer JSON, rebuild the mel filterbank, and then suppress
+//!     transcription for the first 1 s of the next utterance while the
+//!     `audio_buffer` refills past `MIN_BUFFER_SAMPLES`.
 //!
 //! Tests stub the `EouInference` trait so chunking / flush / reset logic can be
 //! exercised without loading real ONNX models in CI.
@@ -81,9 +84,14 @@ pub trait EouInference: Send {
     fn transcribe_chunk_reset(&mut self, chunk: &[f32])
         -> Result<String, TranscriptionError>;
 
-    /// Discard internal decoder/encoder state and start fresh. Used between
-    /// utterances so audio from the previous utterance cannot bleed into the
-    /// next one via the 4 s encoder ring buffer.
+    /// Discard internal decoder/encoder state and start fresh by rebuilding
+    /// the model from disk. Retained for completeness but no longer called
+    /// from the streaming hot path — both the mid-stream EOU-marker branch
+    /// and `finalize()` rely on the vendor's internal soft reset (the
+    /// `reset_on_eou=true` path in `transcribe_chunk_reset`) instead. A hard
+    /// reload here would cost hundreds of ms and then swallow the first ~1 s
+    /// of the next utterance while the audio buffer refills past
+    /// `MIN_BUFFER_SAMPLES`.
     fn reset(&mut self) -> Result<(), TranscriptionError>;
 }
 
@@ -498,17 +506,14 @@ fn process_chunk(eou: &mut dyn EouInference, samples: &[f32]) -> ChunkOutcome {
     match eou.transcribe_chunk(samples) {
         Ok(mut delta) => {
             let utterance_done = strip_eou_marker(&mut delta);
-            if utterance_done {
-                // Full reset between utterances. Propagate any reset error as
-                // the chunk's error so the session doesn't silently continue
-                // with a dirty model.
-                if let Err(e) = eou.reset() {
-                    return ChunkOutcome {
-                        result: Err(e),
-                        utterance_done: true,
-                    };
-                }
-            }
+            // No explicit reset here. The vendor only appends [EOU] when it
+            // took the `reset_on_eou=true` branch (`parakeet_eou.rs:166-169`),
+            // and that branch calls `reset_states()` before returning — so
+            // decoder RNN-T state is already cleared by the time we see the
+            // marker. We intentionally do NOT call `eou.reset()` (the
+            // `from_pretrained` reload): it's hundreds of ms and its
+            // freshly-empty `audio_buffer` would swallow the first ~1 s of
+            // the next utterance under the MIN_BUFFER_SAMPLES gate.
             ChunkOutcome {
                 result: Ok(delta),
                 utterance_done,
@@ -723,8 +728,13 @@ mod tests {
         let two_chunks = vec![0.4f32; EOU_CHUNK_SAMPLES * 2];
         let text = session.push_samples(&two_chunks).await.unwrap();
         assert_eq!(text, "hello world");
-        // An EOU marker in the speech-chunk path triggers the hard reset.
-        assert_eq!(*handles.hard_resets.lock().unwrap(), 1);
+        // Neither reset path is invoked on the mid-stream EOU marker: the
+        // vendor's `reset_on_eou=true` branch is what emits the marker in
+        // the first place, and it has already soft-reset decoder state
+        // (`state_h` / `state_c` / `last_token`) internally before returning.
+        // The hard `from_pretrained` reload would cost hundreds of ms and
+        // swallow the first ~1 s of the next utterance — so we skip it.
+        assert_eq!(*handles.hard_resets.lock().unwrap(), 0);
         assert_eq!(*handles.soft_resets.lock().unwrap(), 0);
     }
 
