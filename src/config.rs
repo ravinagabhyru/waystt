@@ -37,6 +37,12 @@ pub struct Config {
     /// ONNX Runtime inter-op thread count for Parakeet. `None` keeps the
     /// parakeet-rs default (1). Rarely worth raising above 1 for this model.
     pub parakeet_inter_threads: Option<usize>,
+    // Continuous mode tunables (see `[continuous]` in config.toml.example)
+    pub continuous_min_speech_ms: u64,
+    pub continuous_silence_threshold_ms: u64,
+    pub continuous_max_chunk_ms: u64,
+    pub continuous_worker_count: usize,
+    pub continuous_max_queue_size: usize,
     // LLM post-processing ("refinement") configuration
     pub llm_refine_enabled: bool,
     pub llm_refine_apply_batch: bool,
@@ -64,6 +70,7 @@ struct ConfigFile {
     whisper: WhisperSection,
     google: GoogleSection,
     parakeet: ParakeetSection,
+    continuous: ContinuousSection,
     llm_refine: LlmRefineSection,
 }
 
@@ -114,6 +121,16 @@ struct ParakeetSection {
     model_path: Option<String>,
     intra_threads: Option<usize>,
     inter_threads: Option<usize>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ContinuousSection {
+    min_speech_ms: Option<u64>,
+    silence_threshold_ms: Option<u64>,
+    max_chunk_ms: Option<u64>,
+    worker_count: Option<usize>,
+    max_queue_size: Option<usize>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -197,6 +214,21 @@ impl ConfigFile {
         if self.parakeet.inter_threads.is_some() {
             config.parakeet_inter_threads = self.parakeet.inter_threads;
         }
+        if let Some(v) = self.continuous.min_speech_ms {
+            config.continuous_min_speech_ms = v;
+        }
+        if let Some(v) = self.continuous.silence_threshold_ms {
+            config.continuous_silence_threshold_ms = v;
+        }
+        if let Some(v) = self.continuous.max_chunk_ms {
+            config.continuous_max_chunk_ms = v;
+        }
+        if let Some(v) = self.continuous.worker_count {
+            config.continuous_worker_count = v.clamp(1, 4);
+        }
+        if let Some(v) = self.continuous.max_queue_size {
+            config.continuous_max_queue_size = v;
+        }
         if let Some(v) = self.llm_refine.enabled {
             config.llm_refine_enabled = v;
         }
@@ -259,6 +291,12 @@ impl Default for Config {
             parakeet_model_path: None,
             parakeet_intra_threads: None,
             parakeet_inter_threads: None,
+            // Continuous mode defaults
+            continuous_min_speech_ms: 300,
+            continuous_silence_threshold_ms: 700,
+            continuous_max_chunk_ms: 30_000,
+            continuous_worker_count: 2,
+            continuous_max_queue_size: 10,
             // LLM refinement defaults (disabled)
             llm_refine_enabled: false,
             llm_refine_apply_batch: true,
@@ -465,6 +503,33 @@ impl Config {
         if let Ok(v) = std::env::var("LLM_REFINE_MIN_CHARS") {
             if let Ok(parsed) = v.parse::<usize>() {
                 config.llm_refine_min_chars = parsed;
+            }
+        }
+
+        // Continuous mode tunables
+        if let Ok(v) = std::env::var("CONTINUOUS_MIN_SPEECH_MS") {
+            if let Ok(parsed) = v.parse::<u64>() {
+                config.continuous_min_speech_ms = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("CONTINUOUS_SILENCE_MS") {
+            if let Ok(parsed) = v.parse::<u64>() {
+                config.continuous_silence_threshold_ms = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("CONTINUOUS_MAX_CHUNK_MS") {
+            if let Ok(parsed) = v.parse::<u64>() {
+                config.continuous_max_chunk_ms = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("CONTINUOUS_WORKERS") {
+            if let Ok(parsed) = v.parse::<usize>() {
+                config.continuous_worker_count = parsed.clamp(1, 4);
+            }
+        }
+        if let Ok(v) = std::env::var("CONTINUOUS_MAX_QUEUE_SIZE") {
+            if let Ok(parsed) = v.parse::<usize>() {
+                config.continuous_max_queue_size = parsed;
             }
         }
     }
@@ -920,6 +985,48 @@ mod tests {
         );
         assert_eq!(c.llm_refine_timeout_ms, 2500);
         assert_eq!(c.llm_refine_min_chars, 4);
+    }
+
+    #[test]
+    fn test_load_toml_with_continuous_section() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, "[continuous]").unwrap();
+        writeln!(f, "min_speech_ms = 500").unwrap();
+        writeln!(f, "silence_threshold_ms = 1000").unwrap();
+        writeln!(f, "max_chunk_ms = 15000").unwrap();
+        writeln!(f, "worker_count = 3").unwrap();
+        writeln!(f, "max_queue_size = 20").unwrap();
+
+        let c = Config::load_toml_file(f.path()).unwrap();
+        assert_eq!(c.continuous_min_speech_ms, 500);
+        assert_eq!(c.continuous_silence_threshold_ms, 1000);
+        assert_eq!(c.continuous_max_chunk_ms, 15_000);
+        assert_eq!(c.continuous_worker_count, 3);
+        assert_eq!(c.continuous_max_queue_size, 20);
+    }
+
+    #[test]
+    fn test_continuous_worker_count_clamped_from_toml() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, "[continuous]").unwrap();
+        writeln!(f, "worker_count = 99").unwrap();
+
+        let c = Config::load_toml_file(f.path()).unwrap();
+        assert_eq!(c.continuous_worker_count, 4);
+    }
+
+    #[test]
+    fn test_continuous_defaults_preserved_when_section_absent() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, "[openai]").unwrap();
+        writeln!(f, "api_key = \"x\"").unwrap();
+
+        let c = Config::load_toml_file(f.path()).unwrap();
+        assert_eq!(c.continuous_min_speech_ms, 300);
+        assert_eq!(c.continuous_silence_threshold_ms, 700);
+        assert_eq!(c.continuous_max_chunk_ms, 30_000);
+        assert_eq!(c.continuous_worker_count, 2);
+        assert_eq!(c.continuous_max_queue_size, 10);
     }
 
     #[test]

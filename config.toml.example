@@ -53,6 +53,33 @@ model = "latest_long"
 # alternative_languages = ["fr-FR", "es-ES"]
 
 
+[continuous]
+# Tunables for continuous mode (waystt --continuous, or
+# `wayctl continuous-start` against the daemon). All durations are in
+# milliseconds. Env vars CONTINUOUS_MIN_SPEECH_MS, CONTINUOUS_SILENCE_MS,
+# CONTINUOUS_MAX_CHUNK_MS, CONTINUOUS_WORKERS, CONTINUOUS_MAX_QUEUE_SIZE
+# override these.
+#
+# Per-session IPC options from `wayctl continuous-start --silence-ms / --workers`
+# override the file values for that session only.
+#
+# Minimum voiced duration before a chunk can be extracted. Shorter bursts
+# are ignored as likely noise.
+min_speech_ms = 300
+# Trailing silence that triggers chunk extraction on the batch path
+# (parakeet ctc/tdt, openai, google, local). Raise (e.g. 1000) to reduce
+# mid-sentence splits at the cost of ~300 ms more latency; lower for
+# snappier output. Streaming EOU ignores this — the model emits its own
+# end-of-utterance marker — except as a safety fallback.
+silence_threshold_ms = 700
+# Hard cap on a single chunk; forces extraction even without a silence gap.
+max_chunk_ms = 30000
+# Parallel transcription workers for the batch path. Clamped to 1..=4.
+worker_count = 2
+# Max chunks queued before capture applies back-pressure. Usually leave alone.
+max_queue_size = 10
+
+
 [parakeet]
 # "ctc"  - English-only, faster (batch / one-shot transcription only)
 # "tdt"  - Multilingual, 25 languages (batch / one-shot transcription only)

@@ -358,13 +358,20 @@ impl App {
             }
         }
 
-        // Create continuous config from options
+        // Create continuous config: config-file values are the baseline; IPC
+        // `options` overrides take precedence for the two knobs wayctl exposes.
         let config = ContinuousConfig {
-            min_speech_ms: 300,
-            silence_threshold_ms: options.continuous_silence_ms.unwrap_or(700),
-            max_chunk_ms: 30_000,
-            worker_count: options.continuous_workers.unwrap_or(2).clamp(1, 4) as usize,
-            max_queue_size: 10,
+            min_speech_ms: self.config.continuous_min_speech_ms,
+            silence_threshold_ms: options
+                .continuous_silence_ms
+                .unwrap_or(self.config.continuous_silence_threshold_ms),
+            max_chunk_ms: self.config.continuous_max_chunk_ms,
+            worker_count: options
+                .continuous_workers
+                .map_or(self.config.continuous_worker_count, |w| {
+                    (w as usize).clamp(1, 4)
+                }),
+            max_queue_size: self.config.continuous_max_queue_size,
             sample_rate: self.config.audio_sample_rate,
         };
 
