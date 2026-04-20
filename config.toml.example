@@ -64,6 +64,13 @@ model_type = "eou"
 # Override the default model directory (defaults to
 # ~/.local/share/applications/waystt/parakeet/{model_type}/).
 # model_path = "/path/to/parakeet/model"
+# ONNX Runtime thread pools. Defaults are parakeet-rs's built-ins
+# (intra_threads = 4, inter_threads = 1). Setting intra_threads to your
+# physical core count is the usual CPU tuning knob; inter_threads = 1 is
+# almost always right. Env vars PARAKEET_INTRA_THREADS / PARAKEET_INTER_THREADS
+# override these.
+# intra_threads = 8
+# inter_threads = 1
 
 
 # --- Optional LLM post-processing --------------------------------------------

@@ -1,6 +1,7 @@
 use super::{ApiErrorDetails, TranscriptionError, TranscriptionProvider};
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 /// Model type for Parakeet transcription
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,14 +26,36 @@ impl ParakeetModelType {
     }
 }
 
+/// Loaded ONNX model, held across transcription calls. `ort::Session` (inside
+/// both variants) is `Send + Sync`, but `transcribe_samples` takes `&mut self`,
+/// so we serialize callers with a `Mutex`. waystt transcribes one utterance at
+/// a time so this contention is expected, not a bottleneck.
+///
+/// The CTC variant is `Box`ed because its inner struct is ~4x the size of
+/// `ParakeetTDT` — without boxing clippy flags `large_enum_variant`. The
+/// heap indirection has no observable cost next to ONNX inference.
+enum CachedModel {
+    Ctc(Box<parakeet_rs::Parakeet>),
+    Tdt(Box<parakeet_rs::ParakeetTDT>),
+}
+
 /// Parakeet transcription provider using NVIDIA Parakeet models via ONNX Runtime
 pub struct ParakeetProvider {
     model_type: ParakeetModelType,
     model_path: PathBuf,
+    intra_threads: Option<usize>,
+    inter_threads: Option<usize>,
+    /// Lazily-initialized model cache. Built on first transcription (or
+    /// explicitly via [`ParakeetProvider::warm_up`]) and reused thereafter.
+    cached: Arc<Mutex<Option<CachedModel>>>,
 }
 
 impl ParakeetProvider {
-    /// Create a new Parakeet provider
+    /// Create a new Parakeet provider.
+    ///
+    /// `intra_threads` / `inter_threads` map directly onto ONNX Runtime's
+    /// intra-op / inter-op thread pools. Pass `None` to keep parakeet-rs's
+    /// defaults (4 / 1).
     ///
     /// # Errors
     ///
@@ -40,6 +63,8 @@ impl ParakeetProvider {
     pub fn new(
         model_path: &Path,
         model_type: ParakeetModelType,
+        intra_threads: Option<usize>,
+        inter_threads: Option<usize>,
     ) -> Result<Self, TranscriptionError> {
         if !model_path.exists() {
             return Err(TranscriptionError::ConfigurationError(format!(
@@ -51,7 +76,47 @@ impl ParakeetProvider {
         Ok(Self {
             model_type,
             model_path: model_path.to_path_buf(),
+            intra_threads,
+            inter_threads,
+            cached: Arc::new(Mutex::new(None)),
         })
+    }
+
+    /// Build the ONNX execution config from the provider's thread overrides.
+    fn exec_config(&self) -> parakeet_rs::ExecutionConfig {
+        let mut cfg = parakeet_rs::ExecutionConfig::default();
+        if let Some(n) = self.intra_threads {
+            cfg = cfg.with_intra_threads(n);
+        }
+        if let Some(n) = self.inter_threads {
+            cfg = cfg.with_inter_threads(n);
+        }
+        cfg
+    }
+
+    /// Pre-load the ONNX model so the first transcription doesn't pay the
+    /// cold-load cost. Safe to call multiple times; subsequent calls are
+    /// no-ops.
+    ///
+    /// EOU is rejected here (it goes through the streaming provider).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the model files cannot be loaded.
+    pub fn warm_up(&self) -> Result<(), TranscriptionError> {
+        if self.model_type == ParakeetModelType::EOU {
+            return Ok(());
+        }
+        let mut guard = self.cached.lock().map_err(|_| {
+            TranscriptionError::ConfigurationError(
+                "Parakeet model cache mutex poisoned".to_string(),
+            )
+        })?;
+        if guard.is_some() {
+            return Ok(());
+        }
+        *guard = Some(load_model(&self.model_path, self.model_type, self.exec_config())?);
+        Ok(())
     }
 }
 
@@ -95,13 +160,24 @@ impl TranscriptionProvider for ParakeetProvider {
             TranscriptionError::ConfigurationError(format!("Failed to parse WAV samples: {e}"))
         })?;
 
-        // Clone values needed for the blocking task
+        let cached = Arc::clone(&self.cached);
         let model_path = self.model_path.clone();
         let model_type = self.model_type;
+        let exec_config = self.exec_config();
 
-        // Run transcription in blocking task since parakeet-rs may not be Send
+        // ONNX inference is CPU-bound and blocking; keep it off the tokio worker.
         let result = tokio::task::spawn_blocking(move || {
-            transcribe_blocking(&model_path, model_type, samples, sample_rate, channels)
+            let mut guard = cached.lock().map_err(|_| {
+                TranscriptionError::ConfigurationError(
+                    "Parakeet model cache mutex poisoned".to_string(),
+                )
+            })?;
+            if guard.is_none() {
+                *guard = Some(load_model(&model_path, model_type, exec_config)?);
+            }
+            // Unwrap: just populated above.
+            let model = guard.as_mut().expect("cached model present");
+            transcribe_with_cached(model, samples, sample_rate, channels)
         })
         .await
         .map_err(|e| {
@@ -118,21 +194,18 @@ impl TranscriptionProvider for ParakeetProvider {
     }
 }
 
-/// Blocking transcription function to run in spawn_blocking
-fn transcribe_blocking(
+fn load_model(
     model_path: &Path,
     model_type: ParakeetModelType,
-    samples: Vec<f32>,
-    sample_rate: u32,
-    channels: u16,
-) -> Result<String, TranscriptionError> {
+    exec_config: parakeet_rs::ExecutionConfig,
+) -> Result<CachedModel, TranscriptionError> {
     let model_path_str = model_path
         .to_str()
         .ok_or_else(|| TranscriptionError::ConfigurationError("Invalid model path".to_string()))?;
 
     match model_type {
         ParakeetModelType::CTC => {
-            let mut parakeet = parakeet_rs::Parakeet::from_pretrained(model_path_str, None)
+            let model = parakeet_rs::Parakeet::from_pretrained(model_path_str, Some(exec_config))
                 .map_err(|e| {
                     TranscriptionError::ApiError(ApiErrorDetails {
                         provider: "Parakeet".to_string(),
@@ -142,8 +215,37 @@ fn transcribe_blocking(
                         raw_response: None,
                     })
                 })?;
+            Ok(CachedModel::Ctc(Box::new(model)))
+        }
+        ParakeetModelType::TDT => {
+            let model =
+                parakeet_rs::ParakeetTDT::from_pretrained(model_path_str, Some(exec_config))
+                    .map_err(|e| {
+                        TranscriptionError::ApiError(ApiErrorDetails {
+                            provider: "Parakeet".to_string(),
+                            status_code: None,
+                            error_code: Some("MODEL_LOAD_ERROR".to_string()),
+                            error_message: format!("Failed to load TDT model: {e}"),
+                            raw_response: None,
+                        })
+                    })?;
+            Ok(CachedModel::Tdt(Box::new(model)))
+        }
+        ParakeetModelType::EOU => Err(TranscriptionError::ConfigurationError(
+            "EOU model does not support batch transcription".to_string(),
+        )),
+    }
+}
 
-            let result = parakeet
+fn transcribe_with_cached(
+    model: &mut CachedModel,
+    samples: Vec<f32>,
+    sample_rate: u32,
+    channels: u16,
+) -> Result<String, TranscriptionError> {
+    match model {
+        CachedModel::Ctc(m) => {
+            let result = m
                 .transcribe_samples(
                     samples,
                     sample_rate,
@@ -159,22 +261,10 @@ fn transcribe_blocking(
                         raw_response: None,
                     })
                 })?;
-
             Ok(result.text)
         }
-        ParakeetModelType::TDT => {
-            let mut parakeet = parakeet_rs::ParakeetTDT::from_pretrained(model_path_str, None)
-                .map_err(|e| {
-                    TranscriptionError::ApiError(ApiErrorDetails {
-                        provider: "Parakeet".to_string(),
-                        status_code: None,
-                        error_code: Some("MODEL_LOAD_ERROR".to_string()),
-                        error_message: format!("Failed to load TDT model: {e}"),
-                        raw_response: None,
-                    })
-                })?;
-
-            let result = parakeet
+        CachedModel::Tdt(m) => {
+            let result = m
                 .transcribe_samples(
                     samples,
                     sample_rate,
@@ -190,15 +280,7 @@ fn transcribe_blocking(
                         raw_response: None,
                     })
                 })?;
-
             Ok(result.text)
-        }
-        ParakeetModelType::EOU => {
-            // Unreachable: the `TranscriptionProvider` impl guards against EOU before
-            // reaching this function. Kept for match exhaustiveness.
-            Err(TranscriptionError::ConfigurationError(
-                "EOU model does not support batch transcription".to_string(),
-            ))
         }
     }
 }
@@ -225,7 +307,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         // Directory exists so the provider itself initializes.
         let provider =
-            ParakeetProvider::new(tmp.path(), ParakeetModelType::EOU).expect("provider");
+            ParakeetProvider::new(tmp.path(), ParakeetModelType::EOU, None, None).expect("provider");
         let result = provider.transcribe_with_language(vec![], None).await;
         match result {
             Err(TranscriptionError::ConfigurationError(msg)) => {
@@ -238,7 +320,7 @@ mod tests {
     #[test]
     fn test_parakeet_provider_missing_model() {
         let model_path = std::path::Path::new("/nonexistent/parakeet/model");
-        let result = ParakeetProvider::new(model_path, ParakeetModelType::CTC);
+        let result = ParakeetProvider::new(model_path, ParakeetModelType::CTC, None, None);
         assert!(result.is_err());
 
         if let Err(TranscriptionError::ConfigurationError(msg)) = result {
@@ -246,5 +328,42 @@ mod tests {
         } else {
             panic!("Expected ConfigurationError");
         }
+    }
+
+    #[test]
+    fn test_exec_config_overrides_thread_counts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let provider =
+            ParakeetProvider::new(tmp.path(), ParakeetModelType::CTC, Some(12), Some(2))
+                .expect("provider");
+        let cfg = provider.exec_config();
+        // We only expose Debug on ExecutionConfig; round-trip through the
+        // struct's fields by inspecting its Debug repr since the fields
+        // are pub(crate). This guards against accidentally dropping the
+        // overrides in exec_config().
+        let repr = format!("{cfg:?}");
+        assert!(
+            repr.contains("intra_threads: 12"),
+            "expected intra_threads=12 in {repr}"
+        );
+        assert!(
+            repr.contains("inter_threads: 2"),
+            "expected inter_threads=2 in {repr}"
+        );
+    }
+
+    #[test]
+    fn test_exec_config_defaults_when_unset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let provider = ParakeetProvider::new(tmp.path(), ParakeetModelType::CTC, None, None)
+            .expect("provider");
+        let cfg = provider.exec_config();
+        let repr = format!("{cfg:?}");
+        // parakeet-rs defaults: intra=4, inter=1. See
+        // `execution.rs` ModelConfig::default in the crate.
+        assert!(
+            repr.contains("intra_threads: 4"),
+            "expected parakeet-rs default intra_threads=4 in {repr}"
+        );
     }
 }

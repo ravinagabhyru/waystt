@@ -215,7 +215,23 @@ impl TranscriptionFactory {
                     crate::config::Config::parakeet_model_path(&cfg.parakeet_model_type)
                 };
                 let model_type = parakeet::ParakeetModelType::parse(&cfg.parakeet_model_type);
-                let provider = parakeet::ParakeetProvider::new(&model_path, model_type)?;
+                let provider = parakeet::ParakeetProvider::new(
+                    &model_path,
+                    model_type,
+                    cfg.parakeet_intra_threads,
+                    cfg.parakeet_inter_threads,
+                )?;
+                // Eagerly load the ONNX session so the user's first
+                // `wayctl stop-and-transcribe` doesn't pay the cold-load
+                // cost. EOU is skipped (streaming path owns its own warm-up).
+                if model_type != parakeet::ParakeetModelType::EOU {
+                    eprintln!("Pre-loading Parakeet {} model...", cfg.parakeet_model_type);
+                    if let Err(e) = provider.warm_up() {
+                        eprintln!(
+                            "Warning: Parakeet warm-up failed: {e}. First transcription may be slower."
+                        );
+                    }
+                }
                 Ok(Box::new(provider))
             }
         }

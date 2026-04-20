@@ -30,6 +30,13 @@ pub struct Config {
     // Parakeet configuration
     pub parakeet_model_type: String,
     pub parakeet_model_path: Option<String>,
+    /// ONNX Runtime intra-op thread count for Parakeet. `None` keeps the
+    /// parakeet-rs default (4). Set to your physical core count for
+    /// CPU-bound throughput wins on 6+ core boxes.
+    pub parakeet_intra_threads: Option<usize>,
+    /// ONNX Runtime inter-op thread count for Parakeet. `None` keeps the
+    /// parakeet-rs default (1). Rarely worth raising above 1 for this model.
+    pub parakeet_inter_threads: Option<usize>,
     // LLM post-processing ("refinement") configuration
     pub llm_refine_enabled: bool,
     pub llm_refine_apply_batch: bool,
@@ -105,6 +112,8 @@ struct GoogleSection {
 struct ParakeetSection {
     model_type: Option<String>,
     model_path: Option<String>,
+    intra_threads: Option<usize>,
+    inter_threads: Option<usize>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -182,6 +191,12 @@ impl ConfigFile {
         if self.parakeet.model_path.is_some() {
             config.parakeet_model_path = self.parakeet.model_path;
         }
+        if self.parakeet.intra_threads.is_some() {
+            config.parakeet_intra_threads = self.parakeet.intra_threads;
+        }
+        if self.parakeet.inter_threads.is_some() {
+            config.parakeet_inter_threads = self.parakeet.inter_threads;
+        }
         if let Some(v) = self.llm_refine.enabled {
             config.llm_refine_enabled = v;
         }
@@ -242,6 +257,8 @@ impl Default for Config {
             // Parakeet defaults
             parakeet_model_type: "ctc".to_string(),
             parakeet_model_path: None,
+            parakeet_intra_threads: None,
+            parakeet_inter_threads: None,
             // LLM refinement defaults (disabled)
             llm_refine_enabled: false,
             llm_refine_apply_batch: true,
@@ -399,6 +416,16 @@ impl Config {
         }
         if let Ok(v) = std::env::var("PARAKEET_MODEL_PATH") {
             config.parakeet_model_path = Some(v);
+        }
+        if let Ok(v) = std::env::var("PARAKEET_INTRA_THREADS") {
+            if let Ok(parsed) = v.parse::<usize>() {
+                config.parakeet_intra_threads = Some(parsed);
+            }
+        }
+        if let Ok(v) = std::env::var("PARAKEET_INTER_THREADS") {
+            if let Ok(parsed) = v.parse::<usize>() {
+                config.parakeet_inter_threads = Some(parsed);
+            }
         }
 
         // Load LLM refinement configuration
@@ -701,6 +728,8 @@ mod tests {
         env::remove_var("GOOGLE_SPEECH_ALTERNATIVE_LANGUAGES");
         env::remove_var("PARAKEET_MODEL_TYPE");
         env::remove_var("PARAKEET_MODEL_PATH");
+        env::remove_var("PARAKEET_INTRA_THREADS");
+        env::remove_var("PARAKEET_INTER_THREADS");
         env::remove_var("LLM_REFINE_ENABLED");
         env::remove_var("LLM_REFINE_APPLY_BATCH");
         env::remove_var("LLM_REFINE_APPLY_CONTINUOUS");
@@ -735,6 +764,8 @@ mod tests {
         // Parakeet defaults
         assert_eq!(config.parakeet_model_type, "ctc");
         assert_eq!(config.parakeet_model_path, None);
+        assert_eq!(config.parakeet_intra_threads, None);
+        assert_eq!(config.parakeet_inter_threads, None);
     }
 
     #[tokio::test]

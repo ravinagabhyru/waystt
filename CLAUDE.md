@@ -108,6 +108,12 @@ async fn test_name() {
 - When developing/testing, use `--config config.toml` to use the project-local config file instead of ~/.config/waystt/config.toml
 - Example: `BEEP_VOLUME=0.0 cargo run -- --config config.toml`
 - Env vars still work and always override file values (handy for secrets like `OPENAI_API_KEY`).
+- **Do not set `CARGO_TARGET_DIR` when invoking `cargo`**. The target directory is
+  chosen by the surrounding environment: the host uses `target/`, the dev
+  container uses `target-docker/`. Overriding it forces a from-scratch rebuild
+  of `whisper-rs-sys` / `alsa-sys` and often fails when the environment lacks
+  the matching system libraries. Just run `cargo check` / `cargo test` / `cargo
+  build` without `CARGO_TARGET_DIR=...`.
 
 ## QA Testing Workflow
 
