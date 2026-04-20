@@ -23,6 +23,12 @@ use crate::transcription::{
     StreamingSession, StreamingTranscriptionProvider, TranscriptionProvider,
 };
 
+/// Number of trailing samples to retain in the capture buffer while waiting
+/// for voice. 500 ms at 16 kHz — large enough that a just-started utterance
+/// isn't clipped at its onset, small enough that prolonged silence doesn't
+/// accumulate into oversized chunks.
+const SILENCE_LOOKBACK_SAMPLES: usize = 8_000;
+
 /// Configuration for continuous speech recognition mode
 #[derive(Debug, Clone)]
 pub struct ContinuousConfig {
@@ -413,6 +419,19 @@ impl ContinuousModeController {
             self.silence_state.last_voice_time = Some(now);
         }
 
+        // During prolonged silence (no voice detected since last extraction),
+        // trim old samples from the buffer so it doesn't grow unbounded.
+        // Keep a short lookback so we don't clip the onset of the next
+        // utterance. Without this trim, a long silent gap causes the next
+        // extraction to drain tens of seconds of ambient audio, which the
+        // transcriber turns into phantom fillers.
+        if self.silence_state.first_voice_time.is_none()
+            && buffer_len > SILENCE_LOOKBACK_SAMPLES
+        {
+            let excess = buffer_len - SILENCE_LOOKBACK_SAMPLES;
+            let _ = recorder.drain_samples(excess);
+        }
+
         // Check chunk extraction conditions
         let should_extract = if let (Some(first), Some(last)) = (
             self.silence_state.first_voice_time,
@@ -674,6 +693,23 @@ async fn process_chunk(
     Ok(text)
 }
 
+/// Returns true if `text` is a phantom filler utterance that should be suppressed.
+///
+/// Matches on the text with whitespace and ASCII punctuation stripped and
+/// lowercased. Catches short non-speech transcripts the model emits from idle
+/// ambient noise (e.g. `"Um"`, `"Mm -hmm."`).
+fn is_filler_phantom(text: &str) -> bool {
+    let normalized: String = text
+        .chars()
+        .filter(|c| !c.is_whitespace() && !c.is_ascii_punctuation())
+        .flat_map(char::to_lowercase)
+        .collect();
+    matches!(
+        normalized.as_str(),
+        "um" | "uh" | "mm" | "hmm" | "mmhmm" | "uhhuh"
+    )
+}
+
 /// Task that outputs results in sequence order
 async fn output_ordered_results(
     results: Arc<Mutex<BTreeMap<u64, TranscriptionResult>>>,
@@ -699,7 +735,12 @@ async fn output_ordered_results(
             if let Some(result) = result_opt {
                 match result.result {
                     Ok(text) => {
-                        if !text.is_empty() && output_tx.send(text).await.is_err() {
+                        if is_filler_phantom(&text) {
+                            eprintln!(
+                                "[Continuous] Dropped filler phantom seq={}: \"{text}\"",
+                                result.seq
+                            );
+                        } else if !text.is_empty() && output_tx.send(text).await.is_err() {
                             // Output channel closed
                             return;
                         }
@@ -781,5 +822,28 @@ mod tests {
         assert_eq!(stats.chunks_transcribed, 0);
         assert_eq!(stats.chunks_failed, 0);
         assert!((stats.total_audio_seconds - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_is_filler_phantom_matches_common_fillers() {
+        assert!(is_filler_phantom("Um"));
+        assert!(is_filler_phantom("um"));
+        assert!(is_filler_phantom("Uh."));
+        assert!(is_filler_phantom("Mm-hmm."));
+        assert!(is_filler_phantom("Mm -hmm."));
+        assert!(is_filler_phantom("mm hmm"));
+        assert!(is_filler_phantom("Uh-huh"));
+        assert!(is_filler_phantom("Hmm."));
+    }
+
+    #[test]
+    fn test_is_filler_phantom_preserves_real_speech() {
+        assert!(!is_filler_phantom("Hello"));
+        assert!(!is_filler_phantom("OK."));
+        assert!(!is_filler_phantom("No."));
+        assert!(!is_filler_phantom("Yes."));
+        assert!(!is_filler_phantom("The cat sat."));
+        assert!(!is_filler_phantom("Hi there"));
+        assert!(!is_filler_phantom(""));
     }
 }
