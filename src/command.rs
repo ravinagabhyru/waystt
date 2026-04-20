@@ -16,10 +16,6 @@ pub async fn execute_with_input(command_args: &[String], input: &str) -> Result<
     let command_name = &command_args[0];
     let args = &command_args[1..];
 
-    eprintln!("Executing command: {command_name} {args:?}");
-    let input_len = input.len();
-    eprintln!("Input length: {input_len} characters");
-
     let mut child = Command::new(command_name)
         .args(args)
         .stdin(Stdio::piped())
@@ -51,7 +47,6 @@ pub async fn execute_with_input(command_args: &[String], input: &str) -> Result<
         .map_err(|e| anyhow!("Failed to wait for command completion: {e}"))?;
 
     let exit_code = output.code().unwrap_or(-1);
-    eprintln!("Command completed with exit code: {exit_code}");
 
     Ok(exit_code)
 }

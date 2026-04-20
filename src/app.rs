@@ -192,20 +192,29 @@ impl App {
         }
         let audio_data = self.recorder.get_audio_data()?;
         let text = self.ipc_transcribe_text(audio_data).await?;
+        // Strip leading whitespace for typing sinks: wtype + Electron drops
+        // every space in a burst whose first event is a space. Keep the raw
+        // text for stdout/clipboard where the bug doesn't apply.
+        let typed_text = match options.output {
+            crate::ipc::OutputMode::Type
+            | crate::ipc::OutputMode::Wtype
+            | crate::ipc::OutputMode::Ydotool => text.trim_start().to_string(),
+            crate::ipc::OutputMode::Stdout | crate::ipc::OutputMode::Clipboard => text.clone(),
+        };
 
         match options.output {
             crate::ipc::OutputMode::Stdout => {}
             crate::ipc::OutputMode::Clipboard => {
-                crate::ipc::copy_to_clipboard(&text).await?;
+                crate::ipc::copy_to_clipboard(&typed_text).await?;
             }
             crate::ipc::OutputMode::Type => {
-                crate::ipc::type_text(&text, options.type_newlines).await?;
+                crate::ipc::type_text(&typed_text, options.type_newlines).await?;
             }
             crate::ipc::OutputMode::Wtype => {
-                crate::ipc::type_text_wtype(&text, options.type_newlines).await?;
+                crate::ipc::type_text_wtype(&typed_text, options.type_newlines).await?;
             }
             crate::ipc::OutputMode::Ydotool => {
-                crate::ipc::type_text_ydotool(&text, options.type_newlines).await?;
+                crate::ipc::type_text_ydotool(&typed_text, options.type_newlines).await?;
             }
         }
         let _ = self.recorder.clear_buffer();
@@ -417,7 +426,6 @@ impl App {
         let refine_min_chars = self.config.llm_refine_min_chars;
         let text_refiner = self.text_refiner.clone();
         tokio::spawn(async move {
-            let mut first_emit = true;
             while let Some(text) = output_rx.recv().await {
                 if text.is_empty() {
                     continue;
@@ -441,19 +449,37 @@ impl App {
                 // need an explicit separator — without one, "Hello." followed
                 // by "World." lands as "Hello.World.". Stdout uses println
                 // (newline-separated) and clipboard overwrites, so neither
-                // needs the prefix. Skip if the transcript already leads with
-                // whitespace.
-                let needs_space_prefix = !first_emit
-                    && !text.starts_with(|c: char| c.is_whitespace())
-                    && (pipe_to.is_some()
-                        || matches!(
-                            output_mode,
-                            crate::ipc::OutputMode::Type
-                                | crate::ipc::OutputMode::Wtype
-                                | crate::ipc::OutputMode::Ydotool
-                        ));
-                let text = if needs_space_prefix {
-                    format!(" {text}")
+                // needs a separator.
+                //
+                // We append a trailing space rather than prepending one,
+                // because wtype + Electron (Slack) drops *every* space in a
+                // burst whose first event is a space — verified by typing
+                // " hello world" vs "hello world" into Slack directly
+                // (former lands as "helloworld", latter is correct).
+                // A leading space in the payload triggers the bug; a
+                // trailing space does not.
+                let is_typing_sink = matches!(
+                    output_mode,
+                    crate::ipc::OutputMode::Type
+                        | crate::ipc::OutputMode::Wtype
+                        | crate::ipc::OutputMode::Ydotool
+                );
+                let needs_separator = pipe_to.is_some() || is_typing_sink;
+                // Defensively strip leading whitespace for typing sinks so a
+                // stray leading space from the transcription model can't
+                // re-trigger the Electron/wtype drop.
+                let text = if is_typing_sink {
+                    text.trim_start().to_string()
+                } else {
+                    text
+                };
+                if text.is_empty() {
+                    continue;
+                }
+                let needs_space_suffix =
+                    needs_separator && !text.ends_with(|c: char| c.is_whitespace());
+                let text = if needs_space_suffix {
+                    format!("{text} ")
                 } else {
                     text
                 };
@@ -499,7 +525,6 @@ impl App {
                         }
                     }
                 }
-                first_emit = false;
             }
         });
 
