@@ -417,6 +417,7 @@ impl App {
         let refine_min_chars = self.config.llm_refine_min_chars;
         let text_refiner = self.text_refiner.clone();
         tokio::spawn(async move {
+            let mut first_emit = true;
             while let Some(text) = output_rx.recv().await {
                 if text.is_empty() {
                     continue;
@@ -436,6 +437,26 @@ impl App {
                 if text.is_empty() {
                     continue;
                 }
+                // Sinks that concatenate successive utterances (type/pipe_to)
+                // need an explicit separator — without one, "Hello." followed
+                // by "World." lands as "Hello.World.". Stdout uses println
+                // (newline-separated) and clipboard overwrites, so neither
+                // needs the prefix. Skip if the transcript already leads with
+                // whitespace.
+                let needs_space_prefix = !first_emit
+                    && !text.starts_with(|c: char| c.is_whitespace())
+                    && (pipe_to.is_some()
+                        || matches!(
+                            output_mode,
+                            crate::ipc::OutputMode::Type
+                                | crate::ipc::OutputMode::Wtype
+                                | crate::ipc::OutputMode::Ydotool
+                        ));
+                let text = if needs_space_prefix {
+                    format!(" {text}")
+                } else {
+                    text
+                };
                 if let Some(ref cmd) = pipe_to {
                     match crate::command::execute_with_input(cmd, &text).await {
                         Ok(code) => {
@@ -478,6 +499,7 @@ impl App {
                         }
                     }
                 }
+                first_emit = false;
             }
         });
 
