@@ -1,5 +1,6 @@
 use super::{ApiErrorDetails, TranscriptionError, TranscriptionProvider};
 use async_trait::async_trait;
+use parakeet_rs::Transcriber;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -82,13 +83,18 @@ impl ParakeetProvider {
         })
     }
 
-    /// Build the ONNX execution config from the provider's thread overrides.
-    fn exec_config(&self) -> parakeet_rs::ExecutionConfig {
+    /// Build the ONNX execution config from raw thread overrides. Called on
+    /// the blocking thread because `ExecutionConfig` holds a non-`Send`
+    /// `Rc<dyn Fn>` for arbitrary session-builder hooks (parakeet-rs 0.3.2+).
+    fn build_exec_config(
+        intra_threads: Option<usize>,
+        inter_threads: Option<usize>,
+    ) -> parakeet_rs::ExecutionConfig {
         let mut cfg = parakeet_rs::ExecutionConfig::default();
-        if let Some(n) = self.intra_threads {
+        if let Some(n) = intra_threads {
             cfg = cfg.with_intra_threads(n);
         }
-        if let Some(n) = self.inter_threads {
+        if let Some(n) = inter_threads {
             cfg = cfg.with_inter_threads(n);
         }
         cfg
@@ -115,7 +121,8 @@ impl ParakeetProvider {
         if guard.is_some() {
             return Ok(());
         }
-        *guard = Some(load_model(&self.model_path, self.model_type, self.exec_config())?);
+        let exec_config = Self::build_exec_config(self.intra_threads, self.inter_threads);
+        *guard = Some(load_model(&self.model_path, self.model_type, exec_config)?);
         Ok(())
     }
 }
@@ -163,7 +170,8 @@ impl TranscriptionProvider for ParakeetProvider {
         let cached = Arc::clone(&self.cached);
         let model_path = self.model_path.clone();
         let model_type = self.model_type;
-        let exec_config = self.exec_config();
+        let intra_threads = self.intra_threads;
+        let inter_threads = self.inter_threads;
 
         // ONNX inference is CPU-bound and blocking; keep it off the tokio worker.
         let result = tokio::task::spawn_blocking(move || {
@@ -173,6 +181,7 @@ impl TranscriptionProvider for ParakeetProvider {
                 )
             })?;
             if guard.is_none() {
+                let exec_config = Self::build_exec_config(intra_threads, inter_threads);
                 *guard = Some(load_model(&model_path, model_type, exec_config)?);
             }
             // Unwrap: just populated above.
@@ -336,7 +345,7 @@ mod tests {
         let provider =
             ParakeetProvider::new(tmp.path(), ParakeetModelType::CTC, Some(12), Some(2))
                 .expect("provider");
-        let cfg = provider.exec_config();
+        let cfg = ParakeetProvider::build_exec_config(provider.intra_threads, provider.inter_threads);
         // We only expose Debug on ExecutionConfig; round-trip through the
         // struct's fields by inspecting its Debug repr since the fields
         // are pub(crate). This guards against accidentally dropping the
@@ -357,7 +366,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let provider = ParakeetProvider::new(tmp.path(), ParakeetModelType::CTC, None, None)
             .expect("provider");
-        let cfg = provider.exec_config();
+        let cfg = ParakeetProvider::build_exec_config(provider.intra_threads, provider.inter_threads);
         let repr = format!("{cfg:?}");
         // parakeet-rs defaults: intra=4, inter=1. See
         // `execution.rs` ModelConfig::default in the crate.
