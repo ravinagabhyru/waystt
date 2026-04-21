@@ -54,6 +54,7 @@ pub struct Config {
     pub llm_refine_system_prompt: Option<String>,
     pub llm_refine_max_tokens: Option<u32>,
     pub llm_refine_min_chars: usize,
+    pub llm_refine_log_text: bool,
 }
 
 /// TOML-facing representation of the config file. Sections map to the
@@ -146,6 +147,7 @@ struct LlmRefineSection {
     system_prompt: Option<String>,
     max_tokens: Option<u32>,
     min_chars: Option<usize>,
+    log_text: Option<bool>,
 }
 
 impl ConfigFile {
@@ -262,6 +264,9 @@ impl ConfigFile {
         if let Some(v) = self.llm_refine.min_chars {
             config.llm_refine_min_chars = v;
         }
+        if let Some(v) = self.llm_refine.log_text {
+            config.llm_refine_log_text = v;
+        }
     }
 }
 
@@ -308,6 +313,7 @@ impl Default for Config {
             llm_refine_system_prompt: None,
             llm_refine_max_tokens: None,
             llm_refine_min_chars: 0,
+            llm_refine_log_text: false,
         }
     }
 }
@@ -504,6 +510,9 @@ impl Config {
             if let Ok(parsed) = v.parse::<usize>() {
                 config.llm_refine_min_chars = parsed;
             }
+        }
+        if let Ok(v) = std::env::var("LLM_REFINE_LOG_TEXT") {
+            config.llm_refine_log_text = v.to_lowercase() == "true";
         }
 
         // Continuous mode tunables

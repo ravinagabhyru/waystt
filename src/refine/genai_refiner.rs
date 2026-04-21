@@ -113,9 +113,12 @@ impl GenAiRefiner {
 #[async_trait]
 impl TextRefiner for GenAiRefiner {
     async fn refine(&self, text: &str) -> Result<String, RefineError> {
+        let wrapped = format!(
+            "Clean up this transcript and return only the cleaned text:\n<transcript>\n{text}\n</transcript>"
+        );
         let request = ChatRequest::new(vec![
             ChatMessage::system(self.system_prompt.as_ref()),
-            ChatMessage::user(text),
+            ChatMessage::user(wrapped),
         ]);
         let fut = self
             .client

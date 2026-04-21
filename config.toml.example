@@ -130,6 +130,10 @@ timeout_ms = 5000
 # Skip refinement for transcripts shorter than this many characters
 # (useful for "yes", "no", one-word commands, etc.).
 min_chars = 0
+# Log the raw input and refined output to stderr (debug-only). Off by default
+# because transcripts may contain sensitive content. Errors and latency are
+# logged either way. Env var LLM_REFINE_LOG_TEXT overrides.
+# log_text = true
 
 # Example: local Ollama with llama3.2
 # [llm_refine]

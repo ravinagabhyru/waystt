@@ -268,6 +268,7 @@ impl App {
                 text,
                 self.config.llm_refine_min_chars,
                 RefineScope::Batch,
+                self.config.llm_refine_log_text,
             )
             .await
         } else {
@@ -424,6 +425,7 @@ impl App {
         let type_newlines = options.type_newlines;
         let refine_enabled = self.config.refine_enabled_for_continuous();
         let refine_min_chars = self.config.llm_refine_min_chars;
+        let refine_log_text = self.config.llm_refine_log_text;
         let text_refiner = self.text_refiner.clone();
         tokio::spawn(async move {
             while let Some(text) = output_rx.recv().await {
@@ -437,6 +439,7 @@ impl App {
                         text,
                         refine_min_chars,
                         RefineScope::Continuous,
+                        refine_log_text,
                     )
                     .await
                 } else {
