@@ -678,6 +678,19 @@ pub fn default_config_path() -> PathBuf {
 /// Returns an error if the config file cannot be read or parsed, or if
 /// validation fails for local/parakeet providers (missing model files).
 pub fn bootstrap(config_path: Option<&Path>) -> anyhow::Result<Config> {
+    let cfg = bootstrap_unvalidated(config_path)?;
+    validate_bootstrap(&cfg)?;
+    Ok(cfg)
+}
+
+/// Load the configuration from TOML + env overrides without enforcing
+/// provider-specific validation. Used by the `--download-model` path, which
+/// legitimately runs before the local model file exists.
+///
+/// # Errors
+///
+/// Returns an error if the config file is specified but missing or malformed.
+pub fn bootstrap_unvalidated(config_path: Option<&Path>) -> anyhow::Result<Config> {
     let mut cfg = match config_path {
         Some(path) => {
             if !path.exists() {
@@ -696,19 +709,25 @@ pub fn bootstrap(config_path: Option<&Path>) -> anyhow::Result<Config> {
         }
     };
     cfg.apply_env_overrides();
+    Ok(cfg)
+}
 
-    // Validate configuration but allow non-fatal warnings for providers other than local/parakeet
+/// Run provider-specific validation and emit EOU language warnings. Soft
+/// failures for non-local providers are reported but not fatal; strict
+/// failures for `local` and `parakeet` propagate.
+///
+/// # Errors
+///
+/// Returns an error when the configured provider is `local` or `parakeet`
+/// and its required model file is not present.
+pub fn validate_bootstrap(cfg: &Config) -> anyhow::Result<()> {
     if let Err(e) = cfg.validate() {
         eprintln!("Configuration warning: {e}");
         if cfg.transcription_provider == "local" || cfg.transcription_provider == "parakeet" {
-            // For local providers, validation is strict because model presence is required
             return Err(e);
         }
     }
 
-    // Parakeet EOU is English-only. Warn (don't fail) when users pick a
-    // non-English WHISPER_LANGUAGE with it — the model may still run but the
-    // language tag is meaningless for EOU's English-only vocabulary.
     if cfg.transcription_provider == "parakeet"
         && cfg.parakeet_model_type.eq_ignore_ascii_case("eou")
     {
@@ -726,7 +745,7 @@ pub fn bootstrap(config_path: Option<&Path>) -> anyhow::Result<Config> {
         }
     }
 
-    Ok(cfg)
+    Ok(())
 }
 
 /// Warn once if the legacy `~/.config/waystt/.env` file exists but the user

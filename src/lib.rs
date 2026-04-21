@@ -35,14 +35,14 @@ pub mod wav;
 ///
 /// Returns an error if configuration bootstrap fails, model download fails, or application initialization fails
 pub async fn run(options: cli::RunOptions) -> Result<i32> {
-    // Bootstrap configuration
-    let config = crate::config::bootstrap(options.config_path.as_deref())?;
+    // Load config without provider-specific validation so `--download-model`
+    // works even when the target whisper model file doesn't exist yet.
+    let config = crate::config::bootstrap_unvalidated(options.config_path.as_deref())?;
 
     // Handle model download early and exit if requested
     if options.download_model {
         let model = &config.whisper_model;
         let path = crate::config::Config::model_path(model);
-        // If the model already exists, consider it success and exit 0
         if !path.exists() {
             download_model_with_progress(model).await?;
         }
@@ -50,6 +50,9 @@ pub async fn run(options: cli::RunOptions) -> Result<i32> {
         eprintln!("Model available at {display_path}");
         return Ok(0);
     }
+
+    // Non-download path: enforce provider validation now.
+    crate::config::validate_bootstrap(&config)?;
 
     // Create provider using explicit config injection
     let kind = config.provider_kind();
