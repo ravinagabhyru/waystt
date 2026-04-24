@@ -5,11 +5,11 @@
 **IMPLEMENTED**: Continuous audio recording with CPAL
 
 ## Summary
-~~Record audio continuously to growing buffer until signal received~~
+~~Record audio continuously to growing buffer until a control event is received~~
 **COMPLETED**: Successfully recording real microphone audio with CPAL cross-platform library
 
 ## User Story
-As a user, I want waystt to start recording audio immediately when launched so that I can capture speech for later transcription when I send a signal.
+As a user, I want waystt to record audio on command so that I can capture speech for later transcription through `wayctl`.
 
 ## Implementation Summary
 **Switched from PipeWire to CPAL for better reliability and cross-platform support**
@@ -20,8 +20,8 @@ As a user, I want waystt to start recording audio immediately when launched so t
 - ✅ Configured for Whisper-optimized format: 16kHz sample rate, mono channel, f32 samples
 - ✅ Automatic device discovery and format negotiation
 - ✅ Memory management prevents unbounded growth with rolling buffer
-- ✅ Starts recording immediately on application launch
-- ✅ Stops recording cleanly when signal received
+- ✅ Starts recording on command
+- ✅ Stops recording cleanly when a stop command is received
 - ✅ Comprehensive test-driven development with 10 passing tests
 
 ### Test Results
@@ -30,8 +30,8 @@ As a user, I want waystt to start recording audio immediately when launched so t
 ## Acceptance Criteria - ALL COMPLETED ✅
 - [x] ~~PipeWire~~ **CPAL** integration successfully captures audio from default input device
 - [x] Audio is recorded continuously in 16kHz mono format suitable for Whisper
-- [x] Recording starts immediately when waystt launches
-- [x] Recording stops cleanly when SIGUSR1 or SIGUSR2 signal received
+- [x] Recording starts when requested
+- [x] Recording stops cleanly when requested
 - [x] Audio buffer is accessible for processing after recording stops
 - [x] Basic error handling for audio device unavailable/permission issues
 - [x] Memory usage remains reasonable for typical 30-60 second recordings
@@ -40,7 +40,7 @@ As a user, I want waystt to start recording audio immediately when launched so t
 ## Final Dependencies
 - ✅ CPAL crate added to Cargo.toml (replaces pipewire-rs)
 - ✅ Cross-platform compatibility (Linux/Windows/macOS)
-- ✅ Works with existing signal handling framework
+- ✅ Works with the IPC control framework
 - ✅ No system audio development packages required
 
 ## Priority

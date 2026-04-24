@@ -1,29 +1,30 @@
 # Waystt - Wayland Speech-to-Text Tool Roadmap
 
 ## Project Overview
-**Waystt** is a minimal speech-to-text tool for Wayland environments. It starts recording audio when launched and transcribes on demand via Unix signals. Built in Rust for minimal dependencies and optimal performance.
+**Waystt** is a minimal speech-to-text tool for Wayland environments. It runs as a local daemon and transcribes on demand through the `wayctl` Unix-socket control client. Built in Rust for minimal dependencies and optimal performance.
 
-## Architecture: Signal-Based Transcription
-1. **Launch**: Start continuous audio recording
-2. **Signal**: Receive USR1/USR2 signal to stop and transcribe
+## Architecture: IPC-Based Transcription
+1. **Launch**: Start the `waystt` daemon
+2. **Command**: Receive a `wayctl` command to start, stop, or transcribe
 3. **Transcribe**: Process recorded audio via OpenAI Whisper
 4. **Output**: Inject text into active Wayland window (clipboard + paste)
-5. **Exit**: Tool exits after completing transcription
+5. **Continue**: Daemon stays available for the next command
 
 ## Core Goals
 - **Ultra-minimal**: Single binary, no configuration files required
-- **Signal-driven**: No HTTP APIs or complex interfaces
+- **IPC-driven**: Local Unix-socket control with `wayctl`
 - **Fast text injection**: Clipboard + paste instead of character-by-character typing
 - **Privacy-first**: Optional local transcription, no persistent storage
 - **Resource-efficient**: <50MB memory, minimal CPU when idle
 
 ## Simplified Workflow
 ```
-waystt [starts recording immediately]
-├── Continuous audio recording to memory buffer
-├── On SIGUSR1: Stop recording → Transcribe → Paste to active window → Exit
-├── On SIGUSR2: Stop recording → Transcribe → Copy to clipboard only → Exit
-└── On SIGTERM: Clean shutdown and exit
+waystt [daemon starts]
+├── wayctl start: Begin recording
+├── wayctl stop --output type: Stop → Transcribe → Type into active window
+├── wayctl stop --output clipboard: Stop → Transcribe → Copy to clipboard
+├── wayctl transcribe: Record until trailing silence → Transcribe → Print result
+└── SIGTERM/SIGINT: Clean shutdown and exit
 ```
 
 ## Implementation Phases
@@ -34,11 +35,11 @@ waystt [starts recording immediately]
 1. **Audio Recording Loop** ✅
    - CPAL integration for cross-platform continuous recording
    - Memory-managed buffer for audio data (5-minute max)
-   - Signal handlers for USR1/USR2/TERM
+   - Lifecycle handlers for TERM/INT
 
-2. **Signal Processing**
-   - Unix signal handling for transcription triggers
-   - Safe audio buffer extraction on signal
+2. **IPC Processing**
+   - Unix-socket command handling for transcription triggers
+   - Safe audio buffer extraction on command
    - Graceful shutdown on SIGTERM
 
 3. **Basic Transcription**
@@ -85,10 +86,11 @@ Instead of slow character-by-character typing:
    - Wayland text-input protocol for direct injection
    - Used when clipboard method fails
 
-### Signal Interface
-- **SIGUSR1**: Stop recording, transcribe, paste to active window, then exit
-- **SIGUSR2**: Stop recording, transcribe, copy to clipboard only, then exit
-- **SIGTERM**: Clean shutdown with buffer cleanup and exit
+### Control Interface
+- **wayctl start**: Begin recording
+- **wayctl stop**: Stop recording, transcribe, and emit to the selected output
+- **wayctl transcribe**: Start recording, stop after trailing silence, and emit the result
+- **SIGTERM/SIGINT**: Clean shutdown with buffer cleanup and exit
 
 ### Memory Management
 - Circular audio buffer (default 5 minutes)
@@ -99,7 +101,7 @@ Instead of slow character-by-character typing:
 - **cpal**: Cross-platform audio recording (works with PipeWire, ALSA, etc.)
 - **reqwest**: HTTP client for OpenAI API
 - **wayland-client**: Window management and input simulation
-- **signal-hook**: Unix signal handling
+- **signal-hook**: Lifecycle signal handling
 - **serde**: Configuration (if needed)
 
 ## Usage Examples
@@ -107,11 +109,11 @@ Instead of slow character-by-character typing:
 ```bash
 # Single keybinding one-liners for compositor hotkeys:
 
-# Toggle recording and paste result (most common)
-bindkey "Super+R" "pgrep -x waystt >/dev/null && pkill -USR1 waystt || waystt &"
+# Transcribe and type result
+bindkey "Super+R" "wayctl transcribe --output type"
 
-# Toggle recording and copy result only  
-bindkey "Super+Shift+R" "pgrep -x waystt >/dev/null && pkill -USR2 waystt || waystt &"
+# Transcribe and copy result
+bindkey "Super+Shift+R" "wayctl transcribe --output clipboard"
 ```
 
 ## Technical Milestones

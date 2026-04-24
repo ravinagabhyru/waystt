@@ -1,7 +1,7 @@
 //! Lifecycle signal utilities.
 //!
-//! waystt previously used SIGUSR1/SIGUSR2 as a control channel (start/stop
-//! recording). That was removed in favour of the `wayctl` Unix-socket IPC.
+//! waystt previously used Unix user signals as a recording control channel.
+//! That was removed in favour of the `wayctl` Unix-socket IPC.
 //! Only lifecycle signals are handled here: SIGTERM (process managers, pkill)
 //! and SIGINT (Ctrl-C) both trigger graceful shutdown.
 

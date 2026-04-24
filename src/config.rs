@@ -723,7 +723,10 @@ pub fn bootstrap_unvalidated(config_path: Option<&Path>) -> anyhow::Result<Confi
 pub fn validate_bootstrap(cfg: &Config) -> anyhow::Result<()> {
     if let Err(e) = cfg.validate() {
         eprintln!("Configuration warning: {e}");
-        if cfg.transcription_provider == "local" || cfg.transcription_provider == "parakeet" {
+        if cfg.try_provider_kind().is_err()
+            || cfg.transcription_provider == "local"
+            || cfg.transcription_provider == "parakeet"
+        {
             return Err(e);
         }
     }
@@ -768,15 +771,30 @@ fn maybe_warn_legacy_env_file() {
 
 impl Config {
     /// Map the configured provider to the strongly-typed kind.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `transcription_provider` is not supported.
+    pub fn try_provider_kind(&self) -> anyhow::Result<crate::transcription::ProviderKind> {
+        match self.transcription_provider.to_lowercase().as_str() {
+            "openai" => Ok(crate::transcription::ProviderKind::OpenAI),
+            "google" => Ok(crate::transcription::ProviderKind::Google),
+            "local" => Ok(crate::transcription::ProviderKind::Local),
+            #[cfg(feature = "parakeet")]
+            "parakeet" => Ok(crate::transcription::ProviderKind::Parakeet),
+            provider => anyhow::bail!(
+                "Unsupported transcription provider: {provider}. Supported providers: openai, google, local, parakeet"
+            ),
+        }
+    }
+
+    /// Map the configured provider to the strongly-typed kind.
+    ///
+    /// Callers that handle user input should prefer [`Config::try_provider_kind`].
     #[must_use]
     pub fn provider_kind(&self) -> crate::transcription::ProviderKind {
-        match self.transcription_provider.to_lowercase().as_str() {
-            "google" => crate::transcription::ProviderKind::Google,
-            "local" => crate::transcription::ProviderKind::Local,
-            #[cfg(feature = "parakeet")]
-            "parakeet" => crate::transcription::ProviderKind::Parakeet,
-            _ => crate::transcription::ProviderKind::OpenAI,
-        }
+        self.try_provider_kind()
+            .expect("configuration should have been validated before provider_kind")
     }
 
     /// True when LLM refinement should run for daemon/batch transcribe flows.
@@ -1137,10 +1155,7 @@ mod tests {
 
         let result = config.validate();
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("OPENAI_API_KEY is required"));
+        assert!(result.unwrap_err().to_string().contains("OPENAI_API_KEY"));
     }
 
     #[test]
@@ -1420,6 +1435,21 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("Unsupported transcription provider: azure"));
+    }
+
+    #[test]
+    fn test_try_provider_kind_rejects_unknown_provider() {
+        let config = Config {
+            transcription_provider: "opena".to_string(),
+            ..Default::default()
+        };
+
+        let result = config.try_provider_kind();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Unsupported transcription provider: opena"));
     }
 
     #[tokio::test]

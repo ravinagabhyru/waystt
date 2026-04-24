@@ -24,10 +24,12 @@ use crate::transcription::{
 };
 
 /// Number of trailing samples to retain in the capture buffer while waiting
-/// for voice. 500 ms at 16 kHz — large enough that a just-started utterance
-/// isn't clipped at its onset, small enough that prolonged silence doesn't
+/// for voice. 500 ms is large enough that a just-started utterance isn't
+/// clipped at its onset, small enough that prolonged silence doesn't
 /// accumulate into oversized chunks.
-const SILENCE_LOOKBACK_SAMPLES: usize = 8_000;
+fn silence_lookback_samples(sample_rate: u32) -> usize {
+    (sample_rate as usize / 2).max(1)
+}
 
 /// Configuration for continuous speech recognition mode
 #[derive(Debug, Clone)]
@@ -426,9 +428,9 @@ impl ContinuousModeController {
         // extraction to drain tens of seconds of ambient audio, which the
         // transcriber turns into phantom fillers.
         if self.silence_state.first_voice_time.is_none()
-            && buffer_len > SILENCE_LOOKBACK_SAMPLES
+            && buffer_len > silence_lookback_samples(self.config.sample_rate)
         {
-            let excess = buffer_len - SILENCE_LOOKBACK_SAMPLES;
+            let excess = buffer_len - silence_lookback_samples(self.config.sample_rate);
             let _ = recorder.drain_samples(excess);
         }
 
@@ -776,6 +778,13 @@ mod tests {
         assert_eq!(config.worker_count, 2);
         assert_eq!(config.max_queue_size, 10);
         assert_eq!(config.sample_rate, 16000);
+    }
+
+    #[test]
+    fn test_silence_lookback_scales_with_sample_rate() {
+        assert_eq!(silence_lookback_samples(16_000), 8_000);
+        assert_eq!(silence_lookback_samples(44_100), 22_050);
+        assert_eq!(silence_lookback_samples(0), 1);
     }
 
     #[test]

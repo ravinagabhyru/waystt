@@ -1,21 +1,21 @@
 # Technology Stack Documentation
 
 ## Overview
-This document outlines the technology choices for **waystt**, a signal-driven speech-to-text tool built with Rust. The stack prioritizes minimal dependencies, optimal performance, and reliable operation.
+This document outlines the technology choices for **waystt**, an IPC-controlled speech-to-text daemon built with Rust. The stack prioritizes minimal dependencies, optimal performance, and reliable operation.
 
 ## Core Technologies
 
 ### Language: Rust (Edition 2021)
 **Rationale**: 
-- **Memory Safety**: Prevents audio buffer overruns and signal handler race conditions
+- **Memory Safety**: Prevents audio buffer overruns and concurrency bugs
 - **Zero-cost Abstractions**: Minimal runtime overhead for real-time audio processing
 - **Single Binary**: No runtime dependencies, easy deployment
 - **Excellent Async**: Perfect for handling audio streams and HTTP requests concurrently
-- **Signal Handling**: Robust Unix signal support via signal-hook crate
+- **Async I/O**: Unix-socket IPC, lifecycle handling, and transcription requests
 
 ### Architecture: Event-Driven Tool
 **Design**: Single-threaded event loop with async I/O
-- **Main Thread**: Audio recording loop with signal handling
+- **Main Thread**: Unix-socket daemon loop with audio notifications
 - **Async Tasks**: HTTP requests for transcription
 - **Memory Management**: Circular buffer for audio data
 - **State Management**: Simple state machine (Recording → Transcribing → Ready)
@@ -41,16 +41,14 @@ This document outlines the technology choices for **waystt**, a signal-driven sp
 - **Encoding**: Simple WAV header generation for API submission
 
 
-## Signal Handling
+## Lifecycle Handling
 
 ### Unix Signals: signal-hook
 **Crate**: `signal-hook` + `signal-hook-tokio`
 **Signals**:
-- **SIGUSR1**: Stop recording, transcribe, paste to active window
-- **SIGUSR2**: Stop recording, transcribe, copy to clipboard only  
 - **SIGTERM/SIGINT**: Graceful shutdown with buffer cleanup
 
-**Implementation**: Non-blocking signal handling in async context using signal-hook-tokio
+**Implementation**: Non-blocking lifecycle signal handling in async context using signal-hook-tokio. Recording control uses `wayctl` over the Unix socket.
 
 ## Transcription Services
 

@@ -55,7 +55,7 @@ pub async fn run(options: cli::RunOptions) -> Result<i32> {
     crate::config::validate_bootstrap(&config)?;
 
     // Create provider using explicit config injection
-    let kind = config.provider_kind();
+    let kind = config.try_provider_kind()?;
     let provider =
         crate::transcription::TranscriptionFactory::create_provider(kind, &config).await?;
     let streaming_provider =

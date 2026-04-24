@@ -12,16 +12,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 
-const SAMPLE_RATE: u32 = 16000;
-const CHANNELS: u16 = 1;
-
-// Memory management constants
-const MAX_RECORDING_DURATION_SECONDS: usize = 300; // 5 minutes max
-const MAX_BUFFER_SIZE: usize = SAMPLE_RATE as usize * MAX_RECORDING_DURATION_SECONDS;
+const DEFAULT_SAMPLE_RATE: u32 = 16000;
+const DEFAULT_CHANNELS: u16 = 1;
+const DEFAULT_RECORDING_DURATION_SECONDS: usize = 300;
 
 pub struct AudioRecorder {
     buffer: Arc<Mutex<Vec<f32>>>,
     is_recording: Arc<AtomicBool>,
+    sample_rate: u32,
+    channels: u16,
+    max_buffer_size: usize,
     /// Signalled once per CPAL callback so async consumers can wake on new
     /// audio instead of polling. A single `Notify` coalesces multiple pending
     /// callbacks into one wake-up, which matches "drain everything available
@@ -38,9 +38,44 @@ impl AudioRecorder {
     ///
     /// Currently this function does not return errors, but the signature allows for future error handling
     pub fn new() -> Result<Self> {
+        Self::with_config(
+            DEFAULT_SAMPLE_RATE,
+            DEFAULT_CHANNELS,
+            DEFAULT_RECORDING_DURATION_SECONDS,
+        )
+    }
+
+    /// Create a new audio recorder using explicit capture settings.
+    ///
+    /// Samples are stored as mono f32. Multi-channel input is downmixed to mono
+    /// before it enters the ring buffer so downstream transcription receives a
+    /// consistent format.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when sample rate, channel count, or buffer duration are zero.
+    pub fn with_config(
+        sample_rate: u32,
+        channels: u16,
+        buffer_duration_seconds: usize,
+    ) -> Result<Self> {
+        if sample_rate == 0 {
+            return Err(anyhow!("Audio sample rate must be greater than 0"));
+        }
+        if channels == 0 {
+            return Err(anyhow!("Audio channel count must be greater than 0"));
+        }
+        if buffer_duration_seconds == 0 {
+            return Err(anyhow!("Audio buffer duration must be greater than 0"));
+        }
+
+        let max_buffer_size = sample_rate as usize * buffer_duration_seconds;
         Ok(Self {
             buffer: Arc::new(Mutex::new(Vec::new())),
             is_recording: Arc::new(AtomicBool::new(false)),
+            sample_rate,
+            channels,
+            max_buffer_size,
             audio_notify: Arc::new(Notify::new()),
             stream: None,
             device: None,
@@ -78,15 +113,15 @@ impl AudioRecorder {
         let mut supported_configs = device.supported_input_configs()?;
         let _supported_config = supported_configs
             .find(|config| {
-                config.channels() <= CHANNELS
-                    && config.min_sample_rate().0 <= SAMPLE_RATE
-                    && config.max_sample_rate().0 >= SAMPLE_RATE
+                config.channels() == self.channels
+                    && config.min_sample_rate().0 <= self.sample_rate
+                    && config.max_sample_rate().0 >= self.sample_rate
             })
             .ok_or_else(|| anyhow!("No suitable audio format found"))?;
 
         let config = StreamConfig {
-            channels: CHANNELS,
-            sample_rate: cpal::SampleRate(SAMPLE_RATE),
+            channels: self.channels,
+            sample_rate: cpal::SampleRate(self.sample_rate),
             buffer_size: cpal::BufferSize::Default,
         };
 
@@ -99,16 +134,27 @@ impl AudioRecorder {
         // or short-critical-section work. `Notify::notify_one` is lock-free.
         let buffer_clone = Arc::clone(&self.buffer);
         let notify_clone = Arc::clone(&self.audio_notify);
+        let channel_count = usize::from(channels);
+        let max_buffer_size = self.max_buffer_size;
 
         // Create audio input stream
         let stream = device.build_input_stream(
             &config,
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                let mono_samples;
+                let samples = if channel_count == 1 {
+                    data
+                } else {
+                    mono_samples = downmix_to_mono(data, channel_count);
+                    &mono_samples
+                };
+
                 // Process audio data in the callback
                 if let Ok(mut audio_buffer) = buffer_clone.lock() {
                     // Manage buffer size
-                    if audio_buffer.len() + data.len() > MAX_BUFFER_SIZE {
-                        let samples_to_remove = (audio_buffer.len() + data.len()) - MAX_BUFFER_SIZE;
+                    if audio_buffer.len() + samples.len() > max_buffer_size {
+                        let samples_to_remove =
+                            (audio_buffer.len() + samples.len()) - max_buffer_size;
                         if samples_to_remove < audio_buffer.len() {
                             audio_buffer.drain(0..samples_to_remove);
                         } else {
@@ -116,7 +162,7 @@ impl AudioRecorder {
                         }
                     }
 
-                    audio_buffer.extend_from_slice(data);
+                    audio_buffer.extend_from_slice(samples);
                 }
                 // Wake any async consumer waiting on new audio. This replaces
                 // a 50 ms polling loop — wake latency drops from ~25 ms
@@ -201,7 +247,7 @@ impl AudioRecorder {
             .buffer
             .lock()
             .map_err(|_| anyhow!("Failed to lock buffer"))?;
-        Ok(buffer.len() as f32 / SAMPLE_RATE as f32)
+        Ok(buffer.len() as f32 / self.sample_rate as f32)
     }
 
     /// Get the current buffer length in samples without cloning the data
@@ -264,6 +310,12 @@ impl AudioRecorder {
     pub fn is_recording(&self) -> bool {
         self.is_recording.load(Ordering::Relaxed)
     }
+}
+
+fn downmix_to_mono(data: &[f32], channels: usize) -> Vec<f32> {
+    data.chunks_exact(channels)
+        .map(|frame| frame.iter().sum::<f32>() / channels as f32)
+        .collect()
 }
 
 impl Drop for AudioRecorder {
@@ -348,10 +400,24 @@ mod tests {
 
     #[test]
     fn test_audio_format_constants() {
-        assert_eq!(SAMPLE_RATE, 16000);
-        assert_eq!(CHANNELS, 1);
-        assert_eq!(MAX_RECORDING_DURATION_SECONDS, 300);
-        assert_eq!(MAX_BUFFER_SIZE, 16000 * 300);
+        assert_eq!(DEFAULT_SAMPLE_RATE, 16000);
+        assert_eq!(DEFAULT_CHANNELS, 1);
+        assert_eq!(DEFAULT_RECORDING_DURATION_SECONDS, 300);
+    }
+
+    #[test]
+    fn test_configured_recorder_duration_uses_sample_rate() {
+        let recorder = AudioRecorder::with_config(8000, 1, 10).unwrap();
+        assert_eq!(recorder.sample_rate, 8000);
+        assert_eq!(recorder.channels, 1);
+        assert_eq!(recorder.max_buffer_size, 80_000);
+        assert!(recorder.get_recording_duration_seconds().unwrap().abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_downmix_to_mono() {
+        let samples = vec![1.0, 0.0, 0.25, 0.75];
+        assert_eq!(downmix_to_mono(&samples, 2), vec![0.5, 0.5]);
     }
 
     #[test]

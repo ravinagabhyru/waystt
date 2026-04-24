@@ -47,7 +47,11 @@ impl App {
             volume: config.beep_volume,
         };
         let beeps = BeepPlayer::new(beep_config)?;
-        let recorder = AudioRecorder::new()?;
+        let recorder = AudioRecorder::with_config(
+            config.audio_sample_rate,
+            config.audio_channels,
+            config.audio_buffer_duration_seconds,
+        )?;
         let pipeline = Arc::new(AudioPipeline::new(config.audio_sample_rate));
 
         // Eager model load for streaming providers so first-utterance latency
@@ -172,9 +176,12 @@ impl App {
     }
 
     pub(crate) async fn ipc_cancel(&mut self) -> Result<()> {
+        let was_recording = self.recorder.is_recording();
         let _ = self.recorder.stop_recording();
-        if let Err(e) = self.beeps.play_async(BeepType::RecordingStop).await {
-            eprintln!("Stop beep failed: {e}");
+        if was_recording {
+            if let Err(e) = self.beeps.play_async(BeepType::RecordingStop).await {
+                eprintln!("Stop beep failed: {e}");
+            }
         }
         self.recorder.clear_buffer()?;
         Ok(())
@@ -186,9 +193,12 @@ impl App {
         options: crate::ipc::IpcOptions,
     ) -> Result<(String, u64, crate::ipc::OutputMode)> {
         let start = std::time::Instant::now();
+        let was_recording = self.recorder.is_recording();
         let _ = self.recorder.stop_recording();
-        if let Err(e) = self.beeps.play_async(BeepType::RecordingStop).await {
-            eprintln!("Stop beep failed: {e}");
+        if was_recording {
+            if let Err(e) = self.beeps.play_async(BeepType::RecordingStop).await {
+                eprintln!("Stop beep failed: {e}");
+            }
         }
         let audio_data = self.recorder.get_audio_data()?;
         let text = self.ipc_transcribe_text(audio_data).await?;
