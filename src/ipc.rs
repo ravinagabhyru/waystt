@@ -425,13 +425,7 @@ pub async fn type_text(text: &str, nl: TypeNewlines) -> Result<()> {
 
 /// Type text using wtype in chunks with delays between chunks
 async fn type_text_chunked_wtype(text: &str) -> Result<()> {
-    // Split text into chunks of TYPE_CHUNK_SIZE characters
-    let chunks: Vec<String> = text
-        .chars()
-        .collect::<Vec<_>>()
-        .chunks(TYPE_CHUNK_SIZE)
-        .map(|c| c.iter().collect())
-        .collect();
+    let chunks = split_wtype_chunks(text, TYPE_CHUNK_SIZE);
 
     for (i, chunk) in chunks.iter().enumerate() {
         // Add delay between chunks (not before the first one)
@@ -455,6 +449,29 @@ async fn type_text_chunked_wtype(text: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn split_wtype_chunks(text: &str, max_chars: usize) -> Vec<String> {
+    assert!(max_chars > 0, "max_chars must be positive");
+
+    let chars: Vec<char> = text.chars().collect();
+    let mut chunks = Vec::new();
+    let mut start = 0;
+
+    while start < chars.len() {
+        let mut end = (start + max_chars).min(chars.len());
+
+        // wtype + Electron can drop spaces when a burst starts with
+        // whitespace. Keep boundary whitespace attached to the previous burst.
+        while end < chars.len() && chars[end].is_whitespace() {
+            end += 1;
+        }
+
+        chunks.push(chars[start..end].iter().collect());
+        start = end;
+    }
+
+    chunks
 }
 
 /// Type text explicitly using wtype
@@ -494,5 +511,45 @@ pub async fn type_text_ydotool(text: &str, nl: TypeNewlines) -> Result<()> {
         Ok(())
     } else {
         Err(anyhow!("ydotool failed or not available"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn join(chunks: &[String]) -> String {
+        chunks.concat()
+    }
+
+    #[test]
+    fn split_wtype_chunks_preserves_text() {
+        let text = "hello world this is a browser typing regression test";
+        let chunks = split_wtype_chunks(text, 10);
+
+        assert_eq!(join(&chunks), text);
+    }
+
+    #[test]
+    fn split_wtype_chunks_does_not_start_later_chunk_with_boundary_space() {
+        let text = "abcdefghij klmnopqrst uvwxyz";
+        let chunks = split_wtype_chunks(text, 10);
+
+        assert_eq!(join(&chunks), text);
+        assert_eq!(chunks[0], "abcdefghij ");
+        assert!(chunks
+            .iter()
+            .skip(1)
+            .all(|chunk| { !chunk.chars().next().is_some_and(|c| c.is_whitespace()) }));
+    }
+
+    #[test]
+    fn split_wtype_chunks_keeps_runs_of_boundary_whitespace_on_previous_chunk() {
+        let text = "abcdefghij   klmnopqrst";
+        let chunks = split_wtype_chunks(text, 10);
+
+        assert_eq!(join(&chunks), text);
+        assert_eq!(chunks[0], "abcdefghij   ");
+        assert_eq!(chunks[1], "klmnopqrst");
     }
 }
