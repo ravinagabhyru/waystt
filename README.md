@@ -1,3 +1,11 @@
+> [!IMPORTANT]
+> **This project has been renamed and continued as [`grackle`](https://github.com/ravinagabhyru/grackle).**
+> Active development now happens there — please file issues, get releases, and
+> follow the project at **https://github.com/ravinagabhyru/grackle**. This
+> repository is kept as a frozen archive of the pre-rename history.
+>
+> _`grackle` is a fork of the original [waystt](https://github.com/sevos/waystt) by Artur Roszczyk._
+
 # waystt - Wayland Speech-to-Text Tool
 
 Press a keybind, speak, and get instant text output. A speech-to-text tool that transcribes audio using OpenAI Whisper and outputs to stdout.
